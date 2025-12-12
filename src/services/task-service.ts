@@ -1,0 +1,65 @@
+import { instanceManager } from '../index'
+import { clientFactory } from './cline-client-factory'
+import { configureProvider } from './provider-config'
+import { logger } from '../utils/logger'
+import { metrics } from '../utils/metrics'
+import { CreateTaskRequest, CreateTaskResponse } from '../types'
+import { InstanceNotFoundError } from '../errors/instance-error'
+
+export class TaskService {
+  async createTask(
+    userId: string,
+    projectId: string,
+    request: CreateTaskRequest
+  ): Promise<CreateTaskResponse> {
+    const startTime = Date.now()
+    
+    logger.info('Creating task', { userId, projectId, provider: request.provider })
+
+    // Get or create instance
+    const instanceStartTime = Date.now()
+    const instance = await instanceManager.startInstance(userId, projectId)
+    metrics.instanceStartDuration.observe(Date.now() - instanceStartTime)
+    metrics.activeInstances.set(instanceManager.getInstanceCount())
+
+    // Get client from factory (with connection pooling)
+    const client = await clientFactory.getClient(instance.address)
+
+    // Configure provider (idempotent - safe to call multiple times)
+    await configureProvider(client, request.provider || 'CLINE')
+
+    // Create task
+    const taskId = await client.createTask(request.prompt, request.files)
+    metrics.tasksCreated.inc({ provider: request.provider || 'CLINE' })
+
+    const duration = Date.now() - startTime
+    logger.info('Task created', { taskId, userId, projectId, duration })
+
+    return {
+      taskId,
+      instanceId: instance.instanceId,
+      status: 'created',
+      estimatedDuration: '30-60 seconds'
+    }
+  }
+
+  async getTask(
+    userId: string,
+    projectId: string,
+    taskId: string
+  ): Promise<unknown> {
+    const instanceId = `${userId}-${projectId}`
+    const instance = instanceManager.getInstance(instanceId)
+    
+    if (!instance) {
+      throw new InstanceNotFoundError(instanceId)
+    }
+
+    const client = await clientFactory.getClient(instance.address)
+    return await client.getTask(taskId)
+  }
+}
+
+// Singleton instance
+export const taskService = new TaskService()
+

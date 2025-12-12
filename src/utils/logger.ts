@@ -1,6 +1,7 @@
 import winston from 'winston'
 import * as path from 'path'
 import * as fs from 'fs'
+import { configService } from '../config'
 
 // Ensure logs directory exists
 const logsDir = path.join(process.cwd(), 'logs')
@@ -8,8 +9,10 @@ if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true })
 }
 
+const serverConfig = configService.getServer()
+
 export const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'info',
+  level: serverConfig.logLevel,
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
@@ -37,7 +40,7 @@ export const logger = winston.createLogger({
 })
 
 // If we're not in production, log to console with simpler format
-if (process.env.NODE_ENV !== 'production') {
+if (!serverConfig.nodeEnv || serverConfig.nodeEnv !== 'production') {
   logger.add(new winston.transports.Console({
     format: winston.format.combine(
       winston.format.colorize(),

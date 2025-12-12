@@ -1,35 +1,25 @@
 import { Router } from 'express'
-import { instanceManager } from '../../index'
-import { ClineClient } from '../../services/cline-client'
-import { logger } from '../../utils/logger'
 import { AuthRequest } from '../middleware/auth'
+import { fileService } from '../../services/file-service'
+import { validateFileSearchRequest } from '../../validators/file-validator'
 
 const router = Router()
 
 // Search files
-router.get('/search', async (req: AuthRequest, res) => {
-  const { projectId } = req.params
-  const { q, limit = '10' } = req.query
-  const userId = req.userId!
-
-  if (!q || typeof q !== 'string') {
-    return res.status(400).json({ error: 'Query parameter "q" is required' })
-  }
-
+router.get('/search', async (req: AuthRequest, res, next) => {
   try {
-    const instance = instanceManager.getInstance(`${userId}-${projectId}`)
-    if (!instance) {
-      return res.status(404).json({ error: 'Instance not found' })
-    }
+    const { projectId } = req.params
+    const userId = req.userId!
 
-    const client = new ClineClient(instance.address)
-    await client.connect()
+    // Validate request
+    const request = validateFileSearchRequest(req.query as Record<string, unknown>)
 
-    const files = await client.searchFiles(q, parseInt(limit as string))
-    res.json({ files })
-  } catch (error: any) {
-    logger.error('Failed to search files', { error: error.message })
-    res.status(500).json({ error: error.message })
+    // Search files using service layer
+    const result = await fileService.searchFiles(userId, projectId, request)
+    
+    res.json(result)
+  } catch (error) {
+    next(error)
   }
 })
 

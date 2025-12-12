@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import { logger } from '../../utils/logger'
+import { configService } from '../../config'
 
 export interface AuthRequest extends Request {
   userId?: string
@@ -24,7 +25,7 @@ export function authenticate(
   }
 
   const token = authHeader.substring(7)
-  const secret = process.env.JWT_SECRET
+  const secret = configService.getSecurity().jwtSecret
   
   if (!secret) {
     logger.error('JWT_SECRET not configured')
@@ -32,16 +33,17 @@ export function authenticate(
   }
   
   try {
-    const decoded = jwt.verify(token, secret) as any
-    req.userId = decoded.userId || decoded.id
+    const decoded = jwt.verify(token, secret) as jwt.JwtPayload & { userId?: string; id?: string; email?: string; role?: string }
+    req.userId = decoded.userId || decoded.id || ''
     req.user = {
-      id: decoded.userId || decoded.id,
+      id: decoded.userId || decoded.id || '',
       email: decoded.email || '',
       role: decoded.role || 'user'
     }
     next()
-  } catch (error: any) {
-    logger.warn('Invalid token', { error: error.message })
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    logger.warn('Invalid token', { error: errorMessage })
     return res.status(401).json({ error: 'Invalid token' })
   }
 }

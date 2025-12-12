@@ -1,6 +1,7 @@
 import rateLimit from 'express-rate-limit'
 import { Request } from 'express'
 import { AuthRequest } from './auth'
+import { configService } from '../../config'
 
 // In-memory store (use Redis in production)
 const createMemoryStore = () => {
@@ -31,12 +32,12 @@ export const apiLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   // Use Redis if available, otherwise use memory store
-  store: process.env.REDIS_URL ? undefined : {
-    increment: (key: string, cb: any) => {
+  store: configService.getRedis().url ? undefined : {
+    increment: (key: string, cb: (err: Error | null, result?: { totalHits: number; resetTime: Date }) => void) => {
       const result = memoryStore.increment(key, 15 * 60 * 1000)
       cb(null, result)
     }
-  } as any
+  } as rateLimit.Store
 })
 
 export const taskLimiter = rateLimit({

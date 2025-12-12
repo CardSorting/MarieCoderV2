@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { instanceManager } from '../../index'
+import { configService } from '../../config'
 
 const router = Router()
 
@@ -13,7 +14,8 @@ router.get('/', (req, res) => {
       total: instanceManager.getInstanceCount()
     },
     memory: process.memoryUsage(),
-    version: process.env.npm_package_version || '1.0.0'
+    version: process.env.npm_package_version || '1.0.0',
+    environment: configService.getServer().nodeEnv
   })
 })
 

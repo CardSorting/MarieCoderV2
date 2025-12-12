@@ -1,3 +1,5 @@
+import { ChildProcess } from 'child_process'
+
 export interface InstanceInfo {
   instanceId: string
   address: string
@@ -6,8 +8,8 @@ export interface InstanceInfo {
   clineDataDir: string
   userId: string
   projectId: string
-  coreProcess?: any
-  hostProcess?: any
+  coreProcess?: ChildProcess
+  hostProcess?: ChildProcess
   startedAt: Date
   lastActivity: Date
 }

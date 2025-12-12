@@ -1,5 +1,4 @@
 import express from 'express'
-import dotenv from 'dotenv'
 import { ClineInstanceManager } from './services/cline-instance-manager'
 import { logger } from './utils/logger'
 import { metrics } from './utils/metrics'
@@ -12,25 +11,26 @@ import healthRoutes from './api/routes/health'
 import { errorHandler } from './api/middleware/error-handler'
 import { authenticate } from './api/middleware/auth'
 import { apiLimiter } from './api/middleware/rate-limiter'
-
-// Load environment variables
-dotenv.config()
+import { configService } from './config'
 
 const app = express()
-const PORT = process.env.PORT || 3000
+const serverConfig = configService.getServer()
+const clineConfig = configService.getCline()
+const securityConfig = configService.getSecurity()
 
 // Initialize instance manager
 export const instanceManager = new ClineInstanceManager(
-  process.env.CLINE_CORE_PATH || './dist-standalone/cline-core.js',
-  process.env.CLINE_HOST_PATH || './cline-host',
-  process.env.WORKSPACE_DIR || './workspaces',
-  process.env.CLINE_DIR
+  clineConfig.corePath,
+  clineConfig.hostPath,
+  clineConfig.workspaceDir,
+  clineConfig.clineDir
 )
 
 // Middleware
+app.use(requestContext) // Add request context first
 app.use(helmet())
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
+  origin: securityConfig.allowedOrigins,
   credentials: true
 }))
 app.use(compression())
@@ -77,34 +77,27 @@ app.use('/api/v1/projects/:projectId/files', fileRoutes)
 // Error handler (must be last)
 app.use(errorHandler)
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down gracefully')
-  
-  // Stop all instances
-  const instances = Array.from((instanceManager as any).instances.keys())
+import { shutdownService } from './services/shutdown-service'
+import { clientFactory } from './services/cline-client-factory'
+
+// Register cleanup hooks for graceful shutdown
+shutdownService.registerCleanupHook(async () => {
+  logger.info('Stopping all instances')
+  const instances = Array.from(instanceManager.instances.keys())
   for (const instanceId of instances) {
     await instanceManager.stopInstance(instanceId)
   }
-  
-  process.exit(0)
 })
 
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down gracefully')
-  
-  const instances = Array.from((instanceManager as any).instances.keys())
-  for (const instanceId of instances) {
-    await instanceManager.stopInstance(instanceId)
-  }
-  
-  process.exit(0)
+shutdownService.registerCleanupHook(async () => {
+  logger.info('Disconnecting all clients')
+  await clientFactory.removeAllClients()
 })
 
 // Start server
-app.listen(PORT, () => {
-  logger.info(`Cline Backend Service running on port ${PORT}`)
-  logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`)
-  logger.info(`Workspace directory: ${process.env.WORKSPACE_DIR || './workspaces'}`)
+app.listen(serverConfig.port, () => {
+  logger.info(`Cline Backend Service running on port ${serverConfig.port}`)
+  logger.info(`Environment: ${serverConfig.nodeEnv}`)
+  logger.info(`Workspace directory: ${clineConfig.workspaceDir}`)
 })
 

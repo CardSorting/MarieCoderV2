@@ -1,30 +1,16 @@
-import { spawn, ChildProcess } from 'child_process'
-import * as net from 'net'
+import { spawn } from 'child_process'
 import * as fs from 'fs/promises'
 import * as path from 'path'
 import * as os from 'os'
-import * as grpc from '@grpc/grpc-js'
-import * as protoLoader from '@grpc/proto-loader'
-import * as health from 'grpc-health-check'
 import { logger } from '../utils/logger'
-
-export interface InstanceInfo {
-  instanceId: string
-  address: string
-  hostBridgePort: number
-  workspacePath: string
-  clineDataDir: string
-  userId: string
-  projectId: string
-  coreProcess?: ChildProcess
-  hostProcess?: ChildProcess
-  startedAt: Date
-  lastActivity: Date
-}
+import { InstanceInfo } from '../types'
+import { healthCheckService } from './health-check-service'
+import { portManager } from './port-manager'
 
 export class ClineInstanceManager {
   public instances: Map<string, InstanceInfo> = new Map()
   private clineConfigPath: string
+  private workspaceManager: WorkspaceManager
   
   constructor(
     private clineCorePath: string,
@@ -34,6 +20,7 @@ export class ClineInstanceManager {
   ) {
     // Default Cline config directory (~/.cline)
     this.clineConfigPath = baseClineDir || path.join(os.homedir(), '.cline')
+    this.workspaceManager = new WorkspaceManager(baseWorkspaceDir)
     logger.info('ClineInstanceManager initialized', {
       clineCorePath,
       clineHostPath,
@@ -42,27 +29,6 @@ export class ClineInstanceManager {
     })
   }
   
-  /**
-   * Find available ports by letting the OS allocate them (like Cline CLI does)
-   */
-  private async findAvailablePortPair(): Promise<[number, number]> {
-    return new Promise((resolve, reject) => {
-      const coreServer = net.createServer()
-      const hostServer = net.createServer()
-      
-      coreServer.listen(0, () => {
-        const corePort = (coreServer.address() as net.AddressInfo).port
-        hostServer.listen(0, () => {
-          const hostPort = (hostServer.address() as net.AddressInfo).port
-          coreServer.close()
-          hostServer.close()
-          resolve([corePort, hostPort])
-        })
-        hostServer.on('error', reject)
-      })
-      coreServer.on('error', reject)
-    })
-  }
   
   async startInstance(
     userId: string,
@@ -73,7 +39,7 @@ export class ClineInstanceManager {
     // Check if instance already exists and is healthy
     const existing = this.instances.get(instanceId)
     if (existing) {
-      const isHealthy = await this.checkHealth(existing.address)
+      const isHealthy = await healthCheckService.checkHealth(existing.address)
       if (isHealthy) {
         existing.lastActivity = new Date()
         logger.info('Reusing existing instance', { instanceId })
@@ -86,16 +52,15 @@ export class ClineInstanceManager {
     
     logger.info('Starting new instance', { instanceId, userId, projectId })
     
-    // Create workspace directory
-    const workspacePath = path.join(this.baseWorkspaceDir, userId, projectId)
-    await fs.mkdir(workspacePath, { recursive: true })
+    // Create workspace directory using workspace manager
+    const workspacePath = await this.workspaceManager.createWorkspace(userId, projectId)
     
     // Create per-instance Cline data directory
     const clineDataDir = path.join(this.clineConfigPath, 'instances', instanceId)
     await fs.mkdir(clineDataDir, { recursive: true })
     
     // Allocate ports (let OS choose available ports)
-    const [corePort, hostBridgePort] = await this.findAvailablePortPair()
+    const [corePort, hostBridgePort] = await portManager.findAvailablePortPair()
     
     // Create logs directory
     const logsDir = path.join(clineDataDir, 'logs')
@@ -122,7 +87,7 @@ export class ClineInstanceManager {
     })
     
     // Wait for host bridge to be ready (gRPC health check)
-    await this.waitForHostBridge(hostBridgePort, 30000)
+    await healthCheckService.waitForHostBridge(hostBridgePort, 30000)
     
     // Start cline-core
     const coreLogFile = path.join(
@@ -153,7 +118,7 @@ export class ClineInstanceManager {
         PROTOBUS_ADDRESS: `127.0.0.1:${corePort}`,
         HOST_BRIDGE_ADDRESS: `127.0.0.1:${hostBridgePort}`,
         NODE_PATH: nodePath,
-        NODE_ENV: process.env.NODE_ENV || 'production',
+        NODE_ENV: process.env.NODE_ENV || 'production', // Keep process.env for child process
         CLINE_DIR: clineDataDir,
         INSTALL_DIR: installDir
       }
@@ -164,7 +129,7 @@ export class ClineInstanceManager {
     })
     
     // Wait for core to register in SQLite and be ready
-    await this.waitForCoreReady(corePort, 60000)
+    await healthCheckService.waitForCoreReady(corePort, 60000)
     
     // Create instance info
     const instance: InstanceInfo = {
@@ -232,8 +197,9 @@ export class ClineInstanceManager {
           instance.hostProcess.kill('SIGKILL')
         }
       }
-    } catch (error: any) {
-      logger.error('Error stopping instance', { instanceId, error: error.message })
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      logger.error('Error stopping instance', { instanceId, error: errorMessage })
     } finally {
       this.instances.delete(instanceId)
       logger.info('Instance stopped', { instanceId })
@@ -246,86 +212,6 @@ export class ClineInstanceManager {
   
   getInstanceCount(): number {
     return this.instances.size
-  }
-  
-  private async waitForHostBridge(port: number, timeout = 30000): Promise<void> {
-    const start = Date.now()
-    while (Date.now() - start < timeout) {
-      try {
-        const healthDef = protoLoader.loadSync(health.protoPath)
-        const grpcObj = grpc.loadPackageDefinition(healthDef) as any
-        const Health = grpcObj.grpc.health.v1.Health
-        const client = new Health(
-          `127.0.0.1:${port}`,
-          grpc.credentials.createInsecure(),
-          { 'grpc.enable_http_proxy': 0 }
-        )
-        
-        const response = await new Promise<any>((resolve, reject) => {
-          client.check({ service: '' }, (err: any, resp: any) => {
-            if (err) reject(err)
-            else resolve(resp)
-          })
-        })
-        
-        if (response?.status === 1) { // SERVING
-          client.close()
-          return
-        }
-        client.close()
-      } catch {
-        // Not ready yet
-      }
-      await new Promise(resolve => setTimeout(resolve, 500))
-    }
-    throw new Error(`Host bridge not ready after ${timeout}ms`)
-  }
-  
-  private async waitForCoreReady(port: number, timeout = 60000): Promise<void> {
-    const start = Date.now()
-    const address = `127.0.0.1:${port}`
-    
-    while (Date.now() - start < timeout) {
-      try {
-        // Check health
-        const isHealthy = await this.checkHealth(address)
-        if (isHealthy) {
-          // Also check if registered in SQLite (optional, but recommended)
-          // The instance self-registers in ~/.cline/locks.db
-          return
-        }
-      } catch {
-        // Not ready yet
-      }
-      await new Promise(resolve => setTimeout(resolve, 1000))
-    }
-    throw new Error(`Core not ready after ${timeout}ms`)
-  }
-  
-  private async checkHealth(address: string): Promise<boolean> {
-    try {
-      const healthDef = protoLoader.loadSync(health.protoPath)
-      const grpcObj = grpc.loadPackageDefinition(healthDef) as any
-      const Health = grpcObj.grpc.health.v1.Health
-      const client = new Health(
-        address,
-        grpc.credentials.createInsecure(),
-        { 'grpc.enable_http_proxy': 0 }
-      )
-      
-      const response = await new Promise<any>((resolve, reject) => {
-        client.check({ service: '' }, (err: any, resp: any) => {
-          if (err) reject(err)
-          else resolve(resp)
-        })
-      })
-      
-      const isHealthy = response?.status === 1 // SERVING
-      client.close()
-      return isHealthy
-    } catch {
-      return false
-    }
   }
   
   async isReady(): Promise<boolean> {

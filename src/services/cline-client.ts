@@ -3,9 +3,11 @@ import * as protoLoader from '@grpc/proto-loader'
 import * as path from 'path'
 import { promisify } from 'util'
 import { logger } from '../utils/logger'
+import { GrpcClientMap, GrpcPackageDefinition, NewTaskRequest, NewTaskResponse, ShowTaskRequest, FileSearchRequest, FileSearchResponse, UpdateApiConfigurationRequest, StateUpdate } from '../types/grpc'
+import { ClientError, ClientConnectionError } from '../errors/client-error'
 
 export class ClineClient {
-  private clients: any = {}
+  private clients: GrpcClientMap = {} as GrpcClientMap
   private protoPath: string
   private connected: boolean = false
   
@@ -43,92 +45,110 @@ export class ClineClient {
         }
       )
       
-      const proto = grpc.loadPackageDefinition(packageDefinition) as any
+      const proto = grpc.loadPackageDefinition(packageDefinition) as unknown as GrpcPackageDefinition
       
       const creds = grpc.credentials.createInsecure()
       const options = { 'grpc.enable_http_proxy': 0 }
       
       this.clients = {
-        Task: new proto.cline.TaskService(this.address, creds, options),
-        File: new proto.cline.FileService(this.address, creds, options),
-        State: new proto.cline.StateService(this.address, creds, options),
-        Models: new proto.cline.ModelsService(this.address, creds, options)
+        Task: new proto.cline.TaskService(this.address, creds, options) as grpc.Client,
+        File: new proto.cline.FileService(this.address, creds, options) as grpc.Client,
+        State: new proto.cline.StateService(this.address, creds, options) as grpc.Client,
+        Models: new proto.cline.ModelsService(this.address, creds, options) as grpc.Client
       }
       
       this.connected = true
       logger.debug('gRPC client connected', { address: this.address })
-    } catch (error: any) {
-      logger.error('Failed to connect gRPC client', { error: error.message, address: this.address })
-      throw error
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+      logger.error('Failed to connect gRPC client', { error: errorMessage, address: this.address })
+      throw new ClientConnectionError(this.address, `Failed to connect: ${errorMessage}`)
     }
   }
   
   async createTask(prompt: string, files?: string[]): Promise<string> {
-    const newTask = promisify(this.clients.Task.newTask.bind(this.clients.Task))
-    const response = await newTask({
-      metadata: {},
-      text: prompt,
-      files: files || [],
-      images: [],
-      task_settings: {
-        auto_approve_actions: {
-          read_files: true,
-          write_files: true,
-          run_commands: true
+    try {
+      const newTask = promisify((this.clients.Task as any).newTask.bind(this.clients.Task))
+      const request: NewTaskRequest = {
+        metadata: {},
+        text: prompt,
+        files: files || [],
+        images: [],
+        task_settings: {
+          auto_approve_actions: {
+            read_files: true,
+            write_files: true,
+            run_commands: true
+          }
         }
       }
-    })
-    return response.value
+      const response = await newTask(request) as NewTaskResponse
+      return response.value
+    } catch (error: unknown) {
+      throw ClientError.fromGrpcError(error, this.address)
+    }
   }
   
-  async getTask(taskId: string): Promise<any> {
-    const showTask = promisify(
-      this.clients.Task.showTaskWithId.bind(this.clients.Task)
-    )
-    return await showTask({ value: taskId })
+  async getTask(taskId: string): Promise<unknown> {
+    try {
+      const showTask = promisify((this.clients.Task as any).showTaskWithId.bind(this.clients.Task))
+      const request: ShowTaskRequest = { value: taskId }
+      return await showTask(request)
+    } catch (error: unknown) {
+      throw ClientError.fromGrpcError(error, this.address)
+    }
   }
   
   async searchFiles(query: string, maxResults = 10): Promise<string[]> {
-    const searchFiles = promisify(
-      this.clients.File.searchFiles.bind(this.clients.File)
-    )
-    const response = await searchFiles({
-      metadata: {},
-      query,
-      max_results: maxResults
-    })
-    return response.results?.map((r: any) => r.path) || []
+    try {
+      const searchFiles = promisify((this.clients.File as any).searchFiles.bind(this.clients.File))
+      const request: FileSearchRequest = {
+        metadata: {},
+        query,
+        max_results: maxResults
+      }
+      const response = await searchFiles(request) as FileSearchResponse
+      return response.results?.map((r) => r.path) || []
+    } catch (error: unknown) {
+      throw ClientError.fromGrpcError(error, this.address)
+    }
   }
   
-  async updateApiConfiguration(secrets: any, options: any): Promise<void> {
-    const updateConfig = promisify(
-      this.clients.Models.updateApiConfiguration.bind(this.clients.Models)
-    )
-    await updateConfig({
-      metadata: {},
-      secrets,
-      options
-    })
+  async updateApiConfiguration(secrets: UpdateApiConfigurationRequest['secrets'], options: UpdateApiConfigurationRequest['options']): Promise<void> {
+    try {
+      const updateConfig = promisify((this.clients.Models as any).updateApiConfiguration.bind(this.clients.Models))
+      const request: UpdateApiConfigurationRequest = {
+        metadata: {},
+        secrets,
+        options
+      }
+      await updateConfig(request)
+    } catch (error: unknown) {
+      throw ClientError.fromGrpcError(error, this.address)
+    }
   }
   
-  subscribeToState(callback: (state: any) => void): any {
-    const call = this.clients.State.subscribeToState({})
+  subscribeToState(callback: (state: StateUpdate) => void): grpc.ClientReadableStream<StateUpdate> {
+    const call = (this.clients.State as any).subscribeToState({}) as grpc.ClientReadableStream<StateUpdate>
     call.on('data', callback)
-    call.on('error', (err: any) => {
-      logger.error('State stream error', { error: err.message })
+    call.on('error', (err: unknown) => {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+      logger.error('State stream error', { error: errorMessage })
     })
     return call
   }
   
   async cancelTask(): Promise<void> {
-    const cancelTask = promisify(
-      this.clients.Task.cancelTask.bind(this.clients.Task)
-    )
-    await cancelTask({})
+    try {
+      const cancelTask = promisify((this.clients.Task as any).cancelTask.bind(this.clients.Task))
+      await cancelTask({})
+    } catch (error: unknown) {
+      throw ClientError.fromGrpcError(error, this.address)
+    }
   }
   
   disconnect(): void {
-    Object.values(this.clients).forEach((client: any) => {
+    Object.values(this.clients).forEach((client) => {
       if (client && typeof client.close === 'function') {
         client.close()
       }
