@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  cline-backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - CLINE_CORE_PATH=./dist-standalone/cline-core.js
+      - CLINE_HOST_PATH=./cline-host
+      - WORKSPACE_DIR=/workspaces
+      - CLINE_DIR=/.cline
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+    volumes:
+      - ./workspaces:/workspaces
+      - ./cline-data:/.cline
+      - ../dist-standalone:/app/dist-standalone:ro
+      - ../cline-host:/app/cline-host:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Redis for rate limiting
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+
