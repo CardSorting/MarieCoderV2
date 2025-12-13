@@ -30,9 +30,18 @@ export function validateCreateTaskRequest(body: unknown): CreateTaskRequest {
 		return val as "OPENROUTER"
 	})
 
+	// Validate apiKey (optional string)
+	const apiKey = validateOptional(request.apiKey, (val) => {
+		if (typeof val !== "string") {
+			throw new ValidationError("apiKey must be a string")
+		}
+		return val
+	})
+
 	return {
 		prompt,
 		files,
 		provider: provider || "OPENROUTER",
+		apiKey,
 	}
 }

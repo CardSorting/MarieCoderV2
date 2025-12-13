@@ -18,6 +18,7 @@ export interface CreateTaskRequest {
   prompt: string
   files?: string[]
   provider?: 'OPENROUTER'
+  apiKey?: string
 }
 
 export interface CreateTaskResponse {

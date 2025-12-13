@@ -22,7 +22,8 @@ export class TaskService {
 		const client = await clientFactory.getClient(instance.address)
 
 		// Configure provider (idempotent - safe to call multiple times)
-		await configureProvider(client, request.provider || "OPENROUTER")
+		// Use API key from request if provided, otherwise fall back to environment variable
+		await configureProvider(client, request.provider || "OPENROUTER", request.apiKey)
 
 		// Create task
 		const taskId = await client.createTask(request.prompt, request.files)
