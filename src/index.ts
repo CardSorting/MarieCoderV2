@@ -1,4 +1,5 @@
 import express from 'express'
+import { Server } from 'http'
 import { ClineInstanceManager } from './services/cline-instance-manager'
 import { logger } from './utils/logger'
 import { metrics } from './utils/metrics'
@@ -11,7 +12,10 @@ import healthRoutes from './api/routes/health'
 import { errorHandler } from './api/middleware/error-handler'
 import { authenticate } from './api/middleware/auth'
 import { apiLimiter } from './api/middleware/rate-limiter'
+import { requestContext } from './api/middleware/request-context'
 import { configService } from './config'
+import { shutdownService } from './services/shutdown-service'
+import { clientFactory } from './services/cline-client-factory'
 
 const app = express()
 const serverConfig = configService.getServer()
@@ -77,8 +81,6 @@ app.use('/api/v1/projects/:projectId/files', fileRoutes)
 // Error handler (must be last)
 app.use(errorHandler)
 
-import { shutdownService } from './services/shutdown-service'
-import { clientFactory } from './services/cline-client-factory'
 
 // Register cleanup hooks for graceful shutdown
 shutdownService.registerCleanupHook(async () => {
@@ -94,10 +96,37 @@ shutdownService.registerCleanupHook(async () => {
   await clientFactory.removeAllClients()
 })
 
-// Start server
-app.listen(serverConfig.port, () => {
-  logger.info(`Cline Backend Service running on port ${serverConfig.port}`)
+// Store server instance for graceful shutdown
+let server: Server | undefined
+
+// Graceful shutdown hook for HTTP server
+shutdownService.registerCleanupHook(async () => {
+  if (server) {
+    logger.info('Closing HTTP server')
+    return new Promise<void>((resolve) => {
+      server!.close(() => {
+        logger.info('HTTP server closed')
+        resolve()
+      })
+      // Force close after 10 seconds
+      setTimeout(() => {
+        logger.warn('Forcing server close after timeout')
+        resolve()
+      }, 10000)
+    })
+  }
+})
+
+// Start server - Cloud Run requires binding to 0.0.0.0
+const host = process.env.HOST || '0.0.0.0'
+server = app.listen(serverConfig.port, host, () => {
+  logger.info(`Cline Backend Service running on ${host}:${serverConfig.port}`)
   logger.info(`Environment: ${serverConfig.nodeEnv}`)
   logger.info(`Workspace directory: ${clineConfig.workspaceDir}`)
-})
+  
+  // Log Cloud Run specific info if PORT is set (Cloud Run always sets this)
+  if (process.env.PORT) {
+    logger.info('Running on Cloud Run', { port: serverConfig.port })
+  }
+}) as Server
 

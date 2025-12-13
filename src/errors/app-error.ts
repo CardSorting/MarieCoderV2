@@ -1,6 +1,6 @@
 export abstract class AppError extends Error {
   public readonly statusCode: number
-  public readonly code: string
+  public code: string
   public readonly isOperational: boolean
 
   constructor(

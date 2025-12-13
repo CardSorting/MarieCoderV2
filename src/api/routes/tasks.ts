@@ -1,6 +1,8 @@
 import { Router } from 'express'
 import { taskLimiter } from '../middleware/rate-limiter'
 import { AuthRequest } from '../middleware/auth'
+import { validateCreateTaskRequest } from '../../validators/task-validator'
+import { taskService } from '../../services/task-service'
 
 const router = Router()
 

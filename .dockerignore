@@ -1,0 +1,71 @@
+# Docker ignore file for optimized builds
+
+# Dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Build outputs (will be copied separately)
+dist/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Test files
+tests/
+*.test.ts
+*.spec.ts
+coverage/
+.nyc_output/
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+cloudbuild.yaml
+
+# Docker files
+docker-compose.yml
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Build tools
+tsconfig*.json
+jest.config.js
+.eslintrc*
+.prettierrc*
+
+# Cloud Run specific
+.gcloudignore
+service.yaml
+CLOUD_RUN_DEPLOYMENT.md
+

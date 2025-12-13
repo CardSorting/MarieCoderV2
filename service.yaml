@@ -1,0 +1,83 @@
+# Cloud Run service configuration
+# Deploy with: gcloud run services replace service.yaml --region=us-central1
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: cline-backend
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/execution-environment: gen2
+spec:
+  template:
+    metadata:
+      annotations:
+        # Autoscaling settings
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+        # CPU throttling (for cost optimization)
+        run.googleapis.com/cpu-throttling: "true"
+        # Timeout (max 3600s for Cloud Run)
+        run.googleapis.com/timeout: "300s"
+        # Startup CPU boost (helps with cold starts)
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      # Container configuration
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      serviceAccountName: cline-backend@PROJECT_ID.iam.gserviceaccount.com
+      containers:
+      - image: gcr.io/PROJECT_ID/cline-backend:latest
+        ports:
+        - name: http1
+          containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: NODE_ENV
+          value: "production"
+        - name: HOST
+          value: "0.0.0.0"
+        - name: WORKSPACE_DIR
+          value: "/workspaces"
+        - name: CLINE_DIR
+          value: "/root/.cline"
+        # Resource limits
+        resources:
+          limits:
+            cpu: "2000m"
+            memory: 2Gi
+        # Startup probe (Cloud Run uses HTTP)
+        startupProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 0
+          timeoutSeconds: 1
+          periodSeconds: 2
+          failureThreshold: 240
+        # Liveness probe
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 0
+          timeoutSeconds: 1
+          periodSeconds: 10
+          failureThreshold: 3
+        # Readiness probe
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 0
+          timeoutSeconds: 1
+          periodSeconds: 5
+          failureThreshold: 3
+      # Volume mounts (ephemeral storage)
+      volumes:
+      - name: workspace-storage
+        emptyDir: {}
+      - name: cline-storage
+        emptyDir: {}
+

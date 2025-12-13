@@ -67,7 +67,7 @@ function mapGrpcToHttpStatus(grpcCode: grpc.status): number {
       return 500
     case grpc.status.INTERNAL:
       return 500
-    case grpc.status.NOT_IMPLEMENTED:
+    case grpc.status.UNIMPLEMENTED:
       return 501
     case grpc.status.UNAVAILABLE:
       return 503
@@ -100,7 +100,7 @@ function mapGrpcToErrorCode(grpcCode: grpc.status): string {
       return 'DEADLINE_EXCEEDED'
     case grpc.status.INTERNAL:
       return 'INTERNAL_ERROR'
-    case grpc.status.NOT_IMPLEMENTED:
+    case grpc.status.UNIMPLEMENTED:
       return 'NOT_IMPLEMENTED'
     default:
       return 'UNKNOWN_ERROR'

@@ -57,7 +57,8 @@ class ConfigService {
 
     return {
       server: {
-        port: parseInt(process.env.PORT || '3000', 10),
+        // Cloud Run requires PORT env var, defaults to 8080
+        port: parseInt(process.env.PORT || '8080', 10),
         nodeEnv,
         logLevel
       },

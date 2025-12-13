@@ -6,6 +6,7 @@ import { logger } from '../utils/logger'
 import { InstanceInfo } from '../types'
 import { healthCheckService } from './health-check-service'
 import { portManager } from './port-manager'
+import { WorkspaceManager } from './workspace-manager'
 
 export class ClineInstanceManager {
   public instances: Map<string, InstanceInfo> = new Map()

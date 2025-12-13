@@ -55,3 +55,50 @@ docker-run: ## Run Docker container
 docker-stop: ## Stop Docker containers
 	docker-compose -f docker/docker-compose.yml down
 
+# Cloud Run deployment targets
+cloud-build: ## Submit build to Google Cloud Build
+	@if [ -z "$(PROJECT_ID)" ]; then \
+		echo "Error: PROJECT_ID environment variable is required"; \
+		echo "Usage: PROJECT_ID=your-project-id make cloud-build"; \
+		exit 1; \
+	fi
+	gcloud builds submit --config=cloudbuild.yaml \
+		--substitutions=_REGION=$${REGION:-us-central1}
+
+cloud-deploy: ## Deploy to Cloud Run (requires PROJECT_ID and REGION env vars)
+	@if [ -z "$(PROJECT_ID)" ]; then \
+		echo "Error: PROJECT_ID environment variable is required"; \
+		echo "Usage: PROJECT_ID=your-project-id REGION=us-central1 make cloud-deploy"; \
+		exit 1; \
+	fi
+	gcloud run deploy cline-backend \
+		--image gcr.io/$(PROJECT_ID)/cline-backend:latest \
+		--region $${REGION:-us-central1} \
+		--platform managed \
+		--allow-unauthenticated \
+		--memory 2Gi \
+		--cpu 2 \
+		--timeout 300 \
+		--max-instances 10 \
+		--min-instances 0 \
+		--port 8080 \
+		--set-env-vars "NODE_ENV=production,PORT=8080,HOST=0.0.0.0"
+
+cloud-logs: ## View Cloud Run logs
+	@if [ -z "$(PROJECT_ID)" ]; then \
+		echo "Error: PROJECT_ID environment variable is required"; \
+		exit 1; \
+	fi
+	gcloud run services logs read cline-backend \
+		--region $${REGION:-us-central1} \
+		--limit 50
+
+cloud-url: ## Get Cloud Run service URL
+	@if [ -z "$(PROJECT_ID)" ]; then \
+		echo "Error: PROJECT_ID environment variable is required"; \
+		exit 1; \
+	fi
+	@gcloud run services describe cline-backend \
+		--region $${REGION:-us-central1} \
+		--format 'value(status.url)'
+
