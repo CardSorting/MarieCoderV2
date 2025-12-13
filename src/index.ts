@@ -8,6 +8,9 @@ import cors from 'cors'
 import compression from 'compression'
 import taskRoutes from './api/routes/tasks'
 import fileRoutes from './api/routes/files'
+import terminalRoutes from './api/routes/terminal'
+import projectRoutes from './api/routes/projects'
+import authRoutes from './api/routes/auth'
 import healthRoutes from './api/routes/health'
 import { errorHandler } from './api/middleware/error-handler'
 import { authenticate } from './api/middleware/auth'
@@ -16,6 +19,8 @@ import { requestContext } from './api/middleware/request-context'
 import { configService } from './config'
 import { shutdownService } from './services/shutdown-service'
 import { clientFactory } from './services/cline-client-factory'
+import { dbService } from './services/db-service'
+import { wsServer } from './api/websocket/server'
 
 const app = express()
 const serverConfig = configService.getServer()
@@ -67,6 +72,7 @@ app.use((req, res, next) => {
 
 // Public routes
 app.use('/health', healthRoutes)
+app.use('/api/v1/auth', authRoutes)
 app.get('/metrics', async (req, res) => {
   res.set('Content-Type', metrics.register.contentType)
   res.end(await metrics.register.metrics())
@@ -75,8 +81,10 @@ app.get('/metrics', async (req, res) => {
 // Protected routes
 app.use(authenticate)
 app.use(apiLimiter)
+app.use('/api/v1/projects', projectRoutes)
 app.use('/api/v1/projects/:projectId/tasks', taskRoutes)
 app.use('/api/v1/projects/:projectId/files', fileRoutes)
+app.use('/api/v1/projects/:projectId/terminal', terminalRoutes)
 
 // Error handler (must be last)
 app.use(errorHandler)
@@ -94,6 +102,16 @@ shutdownService.registerCleanupHook(async () => {
 shutdownService.registerCleanupHook(async () => {
   logger.info('Disconnecting all clients')
   await clientFactory.removeAllClients()
+})
+
+shutdownService.registerCleanupHook(async () => {
+  logger.info('Closing WebSocket server')
+  wsServer.close()
+})
+
+shutdownService.registerCleanupHook(async () => {
+  logger.info('Closing database connection')
+  dbService.close()
 })
 
 // Store server instance for graceful shutdown
@@ -117,16 +135,35 @@ shutdownService.registerCleanupHook(async () => {
   }
 })
 
-// Start server - Cloud Run requires binding to 0.0.0.0
-const host = process.env.HOST || '0.0.0.0'
-server = app.listen(serverConfig.port, host, () => {
-  logger.info(`Cline Backend Service running on ${host}:${serverConfig.port}`)
-  logger.info(`Environment: ${serverConfig.nodeEnv}`)
-  logger.info(`Workspace directory: ${clineConfig.workspaceDir}`)
-  
-  // Log Cloud Run specific info if PORT is set (Cloud Run always sets this)
-  if (process.env.PORT) {
-    logger.info('Running on Cloud Run', { port: serverConfig.port })
+// Initialize database and start server
+async function startServer() {
+  try {
+    // Initialize database
+    await dbService.initialize()
+    logger.info('Database initialized')
+
+    // Start server - Cloud Run requires binding to 0.0.0.0
+    const host = process.env.HOST || '0.0.0.0'
+    server = app.listen(serverConfig.port, host, () => {
+      logger.info(`Cline Backend Service running on ${host}:${serverConfig.port}`)
+      logger.info(`Environment: ${serverConfig.nodeEnv}`)
+      logger.info(`Workspace directory: ${clineConfig.workspaceDir}`)
+      
+      // Initialize WebSocket server
+      wsServer.initialize(server!)
+      logger.info('WebSocket server initialized')
+      
+      // Log Cloud Run specific info if PORT is set (Cloud Run always sets this)
+      if (process.env.PORT) {
+        logger.info('Running on Cloud Run', { port: serverConfig.port })
+      }
+    }) as Server
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    logger.error('Failed to start server', { error: errorMessage })
+    process.exit(1)
   }
-}) as Server
+}
+
+startServer()
 
