@@ -90,7 +90,7 @@ class ConfigService {
     }
 
     if (!this.config.apiKeys.openrouter) {
-      warnings.push('WARNING: OPENROUTER_API_KEY not set. Tasks will fail without a provider.')
+      warnings.push('INFO: OPENROUTER_API_KEY not set in environment. Users can provide their own API key via the frontend settings.')
     }
 
     if (this.config.server.port < 1 || this.config.server.port > 65535) {
