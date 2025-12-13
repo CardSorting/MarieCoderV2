@@ -7,15 +7,53 @@ import { Providers } from "./providers"
 import "@/styles/globals.css"
 
 export const metadata: Metadata = {
-	title: "Cline IDE",
-	description: "AI-powered cloud development environment",
+	title: {
+		default: "Cline IDE - AI-Powered Cloud Development Environment",
+		template: "%s | Cline IDE",
+	},
+	description:
+		"Build software 10x faster with AI. The modern cloud IDE that brings AI-powered coding assistance directly into your workflow. Create, iterate, and ship production-ready apps in minutes.",
+	keywords: [
+		"cloud IDE",
+		"AI coding",
+		"development environment",
+		"code editor",
+		"AI assistant",
+		"cloud development",
+		"VS Code alternative",
+		"online IDE",
+	],
+	authors: [{ name: "Cline IDE" }],
+	creator: "Cline IDE",
+	publisher: "Cline IDE",
 	icons: {
 		icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2358a6ff'%3E%3Cpath d='M12 2L14.5 8L21 9L16 14L17.5 21L12 17.5L6.5 21L8 14L3 9L9.5 8L12 2Z'/%3E%3C/svg%3E",
+		apple: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2358a6ff'%3E%3Cpath d='M12 2L14.5 8L21 9L16 14L17.5 21L12 17.5L6.5 21L8 14L3 9L9.5 8L12 2Z'/%3E%3C/svg%3E",
 	},
 	openGraph: {
-		title: "Cline IDE",
-		description: "AI-powered cloud development environment",
 		type: "website",
+		locale: "en_US",
+		title: "Cline IDE - AI-Powered Cloud Development Environment",
+		description:
+			"Build software 10x faster with AI. The modern cloud IDE that brings AI-powered coding assistance directly into your workflow.",
+		siteName: "Cline IDE",
+	},
+	twitter: {
+		card: "summary_large_image",
+		title: "Cline IDE - AI-Powered Cloud Development Environment",
+		description:
+			"Build software 10x faster with AI. The modern cloud IDE that brings AI-powered coding assistance directly into your workflow.",
+	},
+	robots: {
+		index: true,
+		follow: true,
+		googleBot: {
+			index: true,
+			follow: true,
+			"max-video-preview": -1,
+			"max-image-preview": "large",
+			"max-snippet": -1,
+		},
 	},
 }
 
