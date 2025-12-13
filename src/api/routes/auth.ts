@@ -12,14 +12,20 @@ router.get("/authorize", async (req, res, next) => {
 		// Frontend callback URL (where to redirect after auth completes)
 		const frontendCallbackUrl = (req.query.callback_url as string) || `${process.env.FRONTEND_URL || "http://localhost:5173"}/auth/callback`
 		
-		// Backend callback URL (where Cline OAuth will redirect with code)
-		const backendCallbackUrl = `${req.protocol}://${req.get("host")}/api/v1/auth/callback`
+		// For web clients, Cline's OAuth redirects to their callback first
+		// We need to use the frontend callback URL so Cline can redirect there after processing
+		// The frontend will then exchange the code via our backend
+		const callbackUrl = frontendCallbackUrl
 		
-		// Store frontend callback in state parameter for later use
-		const state = Buffer.from(JSON.stringify({ frontendCallbackUrl })).toString('base64')
+		// Store backend info in state for frontend to use when exchanging code
+		const state = Buffer.from(JSON.stringify({ 
+			frontendCallbackUrl,
+			backendUrl: `${req.protocol}://${req.get("host")}`
+		})).toString('base64')
 		
-		// Get auth URL from Cline API using backend callback
-		const authUrl = await clineAuthService.getAuthUrl(backendCallbackUrl, state)
+		// Get auth URL from Cline API using frontend callback
+		// Cline will redirect to frontend, which will then call backend to exchange code
+		const authUrl = await clineAuthService.getAuthUrl(callbackUrl, state)
 
 		res.json({ authUrl })
 	} catch (error) {
