@@ -9,9 +9,17 @@ const router = Router()
 // Get Cline OAuth authorization URL
 router.get("/authorize", async (req, res, next) => {
 	try {
-		const callbackUrl = (req.query.callback_url as string) || `${req.protocol}://${req.get("host")}/api/v1/auth/callback`
-
-		const authUrl = await clineAuthService.getAuthUrl(callbackUrl)
+		// Frontend callback URL (where to redirect after auth completes)
+		const frontendCallbackUrl = (req.query.callback_url as string) || `${process.env.FRONTEND_URL || "http://localhost:5173"}/auth/callback`
+		
+		// Backend callback URL (where Cline OAuth will redirect with code)
+		const backendCallbackUrl = `${req.protocol}://${req.get("host")}/api/v1/auth/callback`
+		
+		// Store frontend callback in state parameter for later use
+		const state = Buffer.from(JSON.stringify({ frontendCallbackUrl })).toString('base64')
+		
+		// Get auth URL from Cline API using backend callback
+		const authUrl = await clineAuthService.getAuthUrl(backendCallbackUrl, state)
 
 		res.json({ authUrl })
 	} catch (error) {
@@ -22,7 +30,7 @@ router.get("/authorize", async (req, res, next) => {
 // OAuth callback - exchange code for tokens
 router.get("/callback", async (req, res, _next) => {
 	try {
-		const { code, provider } = req.query
+		const { code, provider, state } = req.query
 
 		if (!code || typeof code !== "string") {
 			return res.status(400).json({ error: "Authorization code is required" })
@@ -49,10 +57,26 @@ router.get("/callback", async (req, res, _next) => {
 			})
 		}
 
+		// Extract frontend callback URL from state if provided
+		let frontendCallbackUrl = process.env.FRONTEND_URL || "http://localhost:5173"
+		if (state && typeof state === "string") {
+			try {
+				const stateData = JSON.parse(Buffer.from(state, "base64").toString())
+				if (stateData.frontendCallbackUrl) {
+					frontendCallbackUrl = stateData.frontendCallbackUrl
+				}
+			} catch {
+				// Invalid state, use default
+			}
+		}
+
 		// Redirect to frontend with token
-		const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173"
+		// Ensure we're redirecting to the auth/callback route
+		const frontendCallbackPath = frontendCallbackUrl.includes('/auth/callback') 
+			? frontendCallbackUrl 
+			: `${frontendCallbackUrl}/auth/callback`
 		res.redirect(
-			`${frontendUrl}/auth/callback?token=${encodeURIComponent(tokens.accessToken)}&refreshToken=${encodeURIComponent(tokens.refreshToken)}`,
+			`${frontendCallbackPath}?token=${encodeURIComponent(tokens.accessToken)}&refreshToken=${encodeURIComponent(tokens.refreshToken)}`,
 		)
 	} catch (error) {
 		logger.error("OAuth callback error", { error })

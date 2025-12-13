@@ -70,7 +70,7 @@ class ConfigService {
       },
       security: {
         jwtSecret: process.env.JWT_SECRET || '',
-        allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',').map(s => s.trim()) || ['http://localhost:3000']
+        allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',').map(s => s.trim()) || ['http://localhost:3000', 'http://localhost:5173']
       },
       apiKeys: {
         anthropic: process.env.ANTHROPIC_API_KEY,

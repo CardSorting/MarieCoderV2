@@ -38,12 +38,15 @@ export class ClineAuthService {
   /**
    * Get authorization URL for OAuth flow
    */
-  async getAuthUrl(callbackUrl: string): Promise<string> {
+  async getAuthUrl(callbackUrl: string, state?: string): Promise<string> {
     try {
       const authUrl = new URL('/api/v1/auth/authorize', CLINE_API_BASE_URL)
       authUrl.searchParams.set('client_type', 'web')
       authUrl.searchParams.set('callback_url', callbackUrl)
       authUrl.searchParams.set('redirect_uri', callbackUrl)
+      if (state) {
+        authUrl.searchParams.set('state', state)
+      }
 
       // Use fetch instead of axios for better redirect handling
       const response = await fetch(authUrl.toString(), {
