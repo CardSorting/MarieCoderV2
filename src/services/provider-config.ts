@@ -3,7 +3,7 @@ import { UpdateApiConfigurationRequest } from "../types/grpc"
 import { logger } from "../utils/logger"
 import { ClineClient } from "./cline-client"
 
-export type Provider = "ANTHROPIC" | "OPENAI" | "CLINE"
+export type Provider = "OPENROUTER"
 
 export async function configureProvider(client: ClineClient, provider: Provider, apiKey?: string): Promise<void> {
 	const apiKeys = configService.getApiKeys()
@@ -13,31 +13,20 @@ export async function configureProvider(client: ClineClient, provider: Provider,
 		options: {},
 	}
 
-	switch (provider) {
-		case "ANTHROPIC":
-			config.secrets.apiKey = apiKey || apiKeys.anthropic
-			config.options.actModeApiProvider = "ANTHROPIC"
-			config.options.actModeApiModelId = "claude-3-5-sonnet-20241022"
-			break
-		case "OPENAI":
-			config.secrets.openAiNativeApiKey = apiKey || apiKeys.openai
-			config.options.actModeApiProvider = "OPENAI"
-			config.options.actModeApiModelId = "gpt-4"
-			break
-		case "CLINE":
-			// For Cline provider, use API key from environment or provided parameter
-			if (apiKey) {
-				config.secrets.clineApiKey = apiKey.startsWith("workos:") ? apiKey : `workos:${apiKey}`
-			} else if (apiKeys.cline) {
-				config.secrets.clineApiKey = apiKeys.cline
-			} else {
-				throw new Error("Cline API key is required for CLINE provider. Set CLINE_API_KEY environment variable or provide apiKey parameter.")
-			}
-			config.options.actModeApiProvider = "CLINE"
-			break
-		default:
-			throw new Error(`Unknown provider: ${provider}`)
+	if (provider !== "OPENROUTER") {
+		throw new Error(`Unsupported provider: ${provider}. Only OPENROUTER is supported.`)
 	}
+
+	// For OpenRouter provider, use API key from environment or provided parameter
+	if (apiKey) {
+		config.secrets.openRouterApiKey = apiKey
+	} else if (apiKeys.openrouter) {
+		config.secrets.openRouterApiKey = apiKeys.openrouter
+	} else {
+		throw new Error("OpenRouter API key is required. Set OPENROUTER_API_KEY environment variable or provide apiKey parameter.")
+	}
+	config.options.actModeApiProvider = "openrouter" // Provider name must be lowercase
+	config.options.actModeApiModelId = "openai/gpt-4" // Default model for OpenRouter
 
 	try {
 		await client.updateApiConfiguration(config.secrets, config.options)

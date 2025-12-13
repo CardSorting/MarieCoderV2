@@ -22,17 +22,17 @@ export function validateCreateTaskRequest(body: unknown): CreateTaskRequest {
 		}),
 	)
 
-	// Validate provider (optional, must be one of the allowed values)
+	// Validate provider (optional, must be OPENROUTER)
 	const provider = validateOptional(request.provider, (val) => {
-		if (val !== "ANTHROPIC" && val !== "OPENAI" && val !== "CLINE") {
-			throw new ValidationError("provider must be one of: ANTHROPIC, OPENAI, CLINE")
+		if (val !== "OPENROUTER") {
+			throw new ValidationError("provider must be OPENROUTER")
 		}
-		return val as "ANTHROPIC" | "OPENAI" | "CLINE"
+		return val as "OPENROUTER"
 	})
 
 	return {
 		prompt,
 		files,
-		provider: provider || "ANTHROPIC",
+		provider: provider || "OPENROUTER",
 	}
 }

@@ -21,9 +21,7 @@ export interface SecurityConfig {
 }
 
 export interface ApiKeysConfig {
-  anthropic?: string
-  cline?: string
-  openai?: string
+  openrouter?: string
 }
 
 export interface RedisConfig {
@@ -73,9 +71,7 @@ class ConfigService {
         allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',').map(s => s.trim()) || ['http://localhost:3000', 'http://localhost:5173']
       },
       apiKeys: {
-        anthropic: process.env.ANTHROPIC_API_KEY,
-        cline: process.env.CLINE_API_KEY,
-        openai: process.env.OPENAI_API_KEY
+        openrouter: process.env.OPENROUTER_API_KEY
       },
       redis: {
         url: process.env.REDIS_URL
@@ -93,8 +89,8 @@ class ConfigService {
       warnings.push('WARNING: JWT_SECRET not set. Authentication will not work properly.')
     }
 
-    if (!this.config.apiKeys.anthropic && !this.config.apiKeys.cline && !this.config.apiKeys.openai) {
-      warnings.push('WARNING: No API keys configured. Tasks will fail without a provider.')
+    if (!this.config.apiKeys.openrouter) {
+      warnings.push('WARNING: OPENROUTER_API_KEY not set. Tasks will fail without a provider.')
     }
 
     if (this.config.server.port < 1 || this.config.server.port > 65535) {

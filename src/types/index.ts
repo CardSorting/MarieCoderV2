@@ -17,7 +17,7 @@ export interface InstanceInfo {
 export interface CreateTaskRequest {
   prompt: string
   files?: string[]
-  provider?: 'ANTHROPIC' | 'OPENAI' | 'CLINE'
+  provider?: 'OPENROUTER'
 }
 
 export interface CreateTaskResponse {

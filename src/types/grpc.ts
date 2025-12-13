@@ -61,9 +61,7 @@ export interface FileSearchResponse {
 export interface UpdateApiConfigurationRequest {
   metadata: Record<string, unknown>
   secrets: {
-    apiKey?: string
-    clineApiKey?: string
-    openAiNativeApiKey?: string
+    openRouterApiKey?: string
     [key: string]: unknown
   }
   options: {

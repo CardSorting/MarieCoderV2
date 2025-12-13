@@ -22,11 +22,11 @@ export class TaskService {
 		const client = await clientFactory.getClient(instance.address)
 
 		// Configure provider (idempotent - safe to call multiple times)
-		await configureProvider(client, request.provider || "ANTHROPIC")
+		await configureProvider(client, request.provider || "OPENROUTER")
 
 		// Create task
 		const taskId = await client.createTask(request.prompt, request.files)
-		metrics.tasksCreated.inc({ provider: request.provider || "ANTHROPIC" })
+		metrics.tasksCreated.inc({ provider: request.provider || "OPENROUTER" })
 
 		const duration = Date.now() - startTime
 		logger.info("Task created", { taskId, userId, projectId, duration })
