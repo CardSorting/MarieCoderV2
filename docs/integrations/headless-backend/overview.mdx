@@ -1,0 +1,148 @@
+---
+title: "Using Cline as a Headless Backend"
+sidebarTitle: "Overview"
+description: "Learn how to use Cline as a backend service for building Replit-like platforms and headless applications"
+---
+
+Cline's standalone architecture enables you to use it as a headless backend service, powering applications like online IDEs, coding platforms, or any service that needs AI-powered code generation and editing capabilities.
+
+## What is Headless Backend Mode?
+
+Headless backend mode allows you to:
+
+- **Run Cline without a UI**: Execute Cline's AI coding capabilities programmatically
+- **Integrate into your platform**: Embed Cline into web applications, APIs, or services
+- **Manage multiple instances**: Run isolated Cline instances for different users or projects
+- **Access all features**: File operations, terminal execution, browser automation, and more
+
+## Architecture Overview
+
+### Multi-Instance Architecture
+
+Cline supports running multiple concurrent instances, each isolated per workspace:
+
+```
+┌─────────────────────────────────────────┐
+│  Your Web Application (Replit-like)    │
+│  - User Management                      │
+│  - Project Management                   │
+│  - Web UI (Monaco Editor, Terminal UI) │
+└──────────────┬──────────────────────────┘
+                │
+                │ HTTP/REST API
+                │ (gRPC Gateway)
+                ▼
+┌─────────────────────────────────────────┐
+│  API Gateway Layer                      │
+│  - gRPC-Web or grpc-gateway             │
+│  - Authentication/Authorization         │
+│  - Rate Limiting                        │
+└──────────────┬──────────────────────────┘
+                │
+                │ gRPC
+                ▼
+┌─────────────────────────────────────────┐
+│  Cline Instance Manager                 │
+│  - Start/Stop instances per user        │
+│  - Instance registry (SQLite)           │
+│  - Health checks                        │
+└──────────────┬──────────────────────────┘
+                │
+                │ Per User/Project
+                ▼
+┌─────────────────────────────────────────┐
+│  Cline Core Instance                    │
+│  - gRPC Server (port 26040)            │
+│  - Host Bridge (port 26041)             │
+│  - Workspace: /workspace/user-123/      │
+└─────────────────────────────────────────┘
+```
+
+## Key Components
+
+### 1. Standalone Core Service
+
+The `cline-core` service runs as a headless Node.js process:
+
+```bash
+# Build the standalone version
+npm run compile-standalone
+
+# Start the core service
+node dist-standalone/cline-core.js \
+  --port 26040 \
+  --host-bridge-port 26041 \
+  --config ~/.cline
+```
+
+**Key Features:**
+- Exposes gRPC API on configurable port
+- Requires Host Bridge service for file operations
+- Supports workspace isolation via `DEV_WORKSPACE_FOLDER`
+- Self-registers in SQLite instance registry
+
+### 2. gRPC API Services
+
+Cline exposes multiple gRPC services:
+
+- **TaskService**: Create and manage AI coding tasks
+- **FileService**: File operations, search, rule management
+- **StateService**: Settings and state management
+- **ModelsService**: Provider configuration
+- **BrowserService**: Browser automation
+- **CommandsService**: Command execution
+- **McpService**: MCP server integration
+
+### 3. Client Libraries
+
+Generated clients available in:
+- **Go**: `cli/pkg/cli/global/registry.go`
+- **Python**: Generated via `scripts/build-python-proto.mjs`
+- **TypeScript**: Use `@grpc/grpc-js` with proto definitions
+
+## Use Cases
+
+### Online IDE Platform (Replit-like)
+
+Build a web-based coding environment where users:
+- Write code in a browser-based editor
+- Get AI assistance for coding tasks
+- Run commands in virtual terminals
+- Deploy applications
+
+### CI/CD Integration
+
+Integrate Cline into your CI/CD pipeline:
+- Automated code generation
+- Code review assistance
+- Test generation
+- Documentation updates
+
+### API Service
+
+Expose Cline capabilities as REST APIs:
+- `/api/v1/generate-code` - Generate code from prompts
+- `/api/v1/refactor` - Refactor existing code
+- `/api/v1/explain` - Explain code changes
+- `/api/v1/fix-bugs` - Fix bugs in codebase
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture Deep Dive" icon="building" href="/integrations/headless-backend/architecture">
+    Learn about the detailed architecture and component interactions
+  </Card>
+  
+  <Card title="Implementation Guide" icon="code" href="/integrations/headless-backend/implementation">
+    Step-by-step guide to implementing a headless backend service
+  </Card>
+  
+  <Card title="API Reference" icon="book" href="/integrations/headless-backend/api-reference">
+    Complete reference for all available gRPC services and methods
+  </Card>
+  
+  <Card title="Multi-Instance Management" icon="server" href="/integrations/headless-backend/multi-instance">
+    How to manage multiple Cline instances for different users/projects
+  </Card>
+</CardGroup>
+

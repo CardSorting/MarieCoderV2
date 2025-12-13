@@ -1,0 +1,501 @@
+---
+title: "API Reference"
+sidebarTitle: "API Reference"
+description: "Complete reference for Cline's gRPC API services"
+---
+
+## Overview
+
+Cline exposes its functionality through gRPC services defined in `proto/cline/`. This reference covers the main services you'll use when building a headless backend.
+
+## TaskService
+
+Manages AI coding tasks - creating, monitoring, and managing tasks.
+
+### `newTask`
+
+Create a new AI coding task.
+
+**Request:**
+```protobuf
+message NewTaskRequest {
+  Metadata metadata = 1;
+  string text = 2;                    // Task prompt/description
+  repeated string images = 3;          // Optional images
+  repeated string files = 4;           // Optional file paths to include
+  optional Settings task_settings = 5;  // Task-specific settings
+}
+```
+
+**Response:**
+```protobuf
+message String {
+  string value = 1;  // Task ID
+}
+```
+
+**Example:**
+```typescript
+const taskId = await client.Task.newTask({
+  metadata: {},
+  text: "Create a REST API with Express.js",
+  files: ["package.json"],
+  task_settings: {
+    auto_approve_actions: {
+      read_files: true,
+      write_files: true,
+      run_commands: true
+    }
+  }
+})
+```
+
+### `showTaskWithId`
+
+Get details about a specific task.
+
+**Request:**
+```protobuf
+message StringRequest {
+  string value = 2;  // Task ID
+}
+```
+
+**Response:**
+```protobuf
+message TaskResponse {
+  string id = 1;
+  string task = 2;
+  int64 ts = 3;
+  bool is_favorited = 4;
+  int64 size = 5;
+  double total_cost = 6;
+  int32 tokens_in = 7;
+  int32 tokens_out = 8;
+  int32 cache_writes = 9;
+  int32 cache_reads = 10;
+  string model_id = 11;
+}
+```
+
+### `getTaskHistory`
+
+Get filtered task history.
+
+**Request:**
+```protobuf
+message GetTaskHistoryRequest {
+  Metadata metadata = 1;
+  bool favorites_only = 2;
+  string search_query = 3;
+  string sort_by = 4;
+  bool current_workspace_only = 5;
+}
+```
+
+**Response:**
+```protobuf
+message TaskHistoryArray {
+  repeated TaskItem tasks = 1;
+  int32 total_count = 2;
+}
+```
+
+### `cancelTask`
+
+Cancel the currently running task.
+
+**Request:**
+```protobuf
+message EmptyRequest {}
+```
+
+**Response:**
+```protobuf
+message Empty {}
+```
+
+### `clearTask`
+
+Clear the current task.
+
+**Request:**
+```protobuf
+message EmptyRequest {}
+```
+
+**Response:**
+```protobuf
+message Empty {}
+```
+
+## FileService
+
+File operations, search, and management.
+
+### `searchFiles`
+
+Search for files in the workspace with fuzzy matching.
+
+**Request:**
+```protobuf
+message FileSearchRequest {
+  Metadata metadata = 1;
+  string query = 2;
+  int32 max_results = 3;
+}
+```
+
+**Response:**
+```protobuf
+message FileSearchResults {
+  repeated FileSearchResult results = 1;
+}
+
+message FileSearchResult {
+  string path = 1;
+  string name = 2;
+  bool is_directory = 3;
+}
+```
+
+**Example:**
+```typescript
+const results = await client.File.searchFiles({
+  query: "auth",
+  max_results: 10
+})
+```
+
+### `openFile`
+
+Open a file in the editor (for headless, this may be a no-op).
+
+**Request:**
+```protobuf
+message StringRequest {
+  string value = 2;  // File path
+}
+```
+
+**Response:**
+```protobuf
+message Empty {}
+```
+
+### `getRelativePaths`
+
+Convert URIs to workspace-relative paths.
+
+**Request:**
+```protobuf
+message RelativePathsRequest {
+  repeated string uris = 1;
+}
+```
+
+**Response:**
+```protobuf
+message RelativePaths {
+  repeated string paths = 1;
+}
+```
+
+## StateService
+
+State management and settings.
+
+### `getLatestState`
+
+Get the current state.
+
+**Request:**
+```protobuf
+message EmptyRequest {}
+```
+
+**Response:**
+```protobuf
+message State {
+  // Large state object with current task, history, settings, etc.
+  optional string current_task_id = 1;
+  repeated TaskItem task_history = 2;
+  // ... many more fields
+}
+```
+
+### `subscribeToState`
+
+Subscribe to state updates (streaming).
+
+**Request:**
+```protobuf
+message EmptyRequest {}
+```
+
+**Response:** (streaming)
+```protobuf
+message State {
+  // State updates streamed as they occur
+}
+```
+
+**Example:**
+```typescript
+const stream = client.State.subscribeToState({})
+stream.on('data', (state) => {
+  console.log('State updated:', state.current_task_id)
+})
+```
+
+### `updateSettings`
+
+Update Cline settings.
+
+**Request:**
+```protobuf
+message UpdateSettingsRequest {
+  Metadata metadata = 1;
+  Settings settings = 2;
+}
+```
+
+**Response:**
+```protobuf
+message Empty {}
+```
+
+## ModelsService
+
+AI provider and model configuration.
+
+### `updateApiConfiguration`
+
+Update API configuration with separate options and secrets.
+
+**Request:**
+```protobuf
+message UpdateApiConfigurationRequestNew {
+  Metadata metadata = 1;
+  ModelsApiSecrets secrets = 2;    // API keys, credentials
+  ModelsApiOptions options = 3;     // Provider settings, model IDs
+}
+
+message ModelsApiSecrets {
+  optional string api_key = 1;                    // Anthropic
+  optional string cline_api_key = 2;              // Cline native
+  optional string open_router_api_key = 4;         // OpenRouter
+  optional string aws_access_key = 5;              // AWS Bedrock
+  optional string aws_secret_key = 6;
+  optional string gemini_api_key = 11;            // Google Gemini
+  optional string open_ai_native_api_key = 12;     // OpenAI
+  optional string deep_seek_api_key = 13;         // DeepSeek
+  optional string xai_api_key = 22;                // xAI
+  // ... many more providers
+}
+
+message ModelsApiOptions {
+  optional ApiProvider act_mode_api_provider = 234;
+  optional string act_mode_api_model_id = 235;
+  optional string aws_region = 7;
+  optional string vertex_project_id = 14;
+  optional string vertex_region = 15;
+  // ... many more options
+}
+```
+
+**Response:**
+```protobuf
+message Empty {}
+```
+
+**Example:**
+```typescript
+await client.Models.updateApiConfiguration({
+  metadata: {},
+  secrets: {
+    apiKey: process.env.ANTHROPIC_API_KEY
+  },
+  options: {
+    actModeApiProvider: "ANTHROPIC",
+    actModeApiModelId: "claude-3-5-sonnet-20241022"
+  }
+})
+```
+
+### `updateApiConfigurationPartial`
+
+Update only specific configuration fields.
+
+**Request:**
+```protobuf
+message UpdateApiConfigurationPartialRequest {
+  Metadata metadata = 1;
+  ModelsApiSecrets secrets = 2;
+  ModelsApiOptions options = 3;
+  // Only set fields that should be updated
+}
+```
+
+## BrowserService
+
+Browser automation capabilities.
+
+### `getBrowserConnectionInfo`
+
+Get browser connection information.
+
+**Request:**
+```protobuf
+message EmptyRequest {}
+```
+
+**Response:**
+```protobuf
+message BrowserConnectionInfo {
+  bool is_connected = 1;
+  bool is_remote = 2;
+  optional string host = 3;
+}
+```
+
+### `testBrowserConnection`
+
+Test browser connection.
+
+**Request:**
+```protobuf
+message StringRequest {
+  string value = 2;  // Browser endpoint URL
+}
+```
+
+**Response:**
+```protobuf
+message BrowserConnection {
+  bool success = 1;
+  string message = 2;
+  optional string endpoint = 3;
+}
+```
+
+## CommandsService
+
+Command execution management.
+
+### `executeCommand`
+
+Execute a shell command.
+
+**Request:**
+```protobuf
+message ExecuteCommandRequest {
+  Metadata metadata = 1;
+  string command = 2;
+  string cwd = 3;
+  optional int32 timeout_seconds = 4;
+}
+```
+
+**Response:**
+```protobuf
+message CommandResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+}
+```
+
+## Common Message Types
+
+### `Metadata`
+
+Empty metadata object (required for most requests):
+```protobuf
+message Metadata {}
+```
+
+### `EmptyRequest` / `Empty`
+
+Empty request/response:
+```protobuf
+message EmptyRequest {}
+message Empty {}
+```
+
+### `StringRequest` / `String`
+
+String wrapper:
+```protobuf
+message StringRequest {
+  string value = 2;
+}
+message String {
+  string value = 1;
+}
+```
+
+## Error Handling
+
+All gRPC calls can return errors with standard gRPC status codes:
+
+- `UNAVAILABLE`: Service not available (instance down)
+- `INVALID_ARGUMENT`: Invalid request parameters
+- `INTERNAL`: Internal server error
+- `NOT_FOUND`: Resource not found (e.g., task ID)
+
+**Example error handling:**
+```typescript
+try {
+  const taskId = await client.Task.newTask({...})
+} catch (error: any) {
+  if (error.code === grpc.status.UNAVAILABLE) {
+    // Instance is down, restart it
+    await restartInstance(instanceId)
+  } else if (error.code === grpc.status.INVALID_ARGUMENT) {
+    // Invalid request
+    console.error('Invalid request:', error.message)
+  }
+}
+```
+
+## Streaming Responses
+
+Some services support streaming responses for real-time updates:
+
+- `StateService.subscribeToState` - State updates
+- `TaskService.subscribeToTaskUpdates` - Task progress updates
+- `ModelsService.subscribeToOpenRouterModels` - Model list updates
+
+**Example:**
+```typescript
+const stream = client.State.subscribeToState({})
+
+stream.on('data', (state) => {
+  // Handle state update
+})
+
+stream.on('error', (error) => {
+  // Handle error
+})
+
+stream.on('end', () => {
+  // Stream ended
+})
+
+// Cancel stream
+stream.cancel()
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Implementation Guide" icon="code" href="/integrations/headless-backend/implementation">
+    Step-by-step implementation guide
+  </Card>
+  
+  <Card title="Multi-Instance Management" icon="server" href="/integrations/headless-backend/multi-instance">
+    Managing multiple instances
+  </Card>
+</CardGroup>
+

@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./cline-backend-mvp
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DB_PATH=/app/data/cline.db
+      - WORKSPACE_DIR=/app/workspaces
+      - CLINE_CORE_PATH=./dist-standalone/cline-core.js
+      - CLINE_HOST_PATH=./cline-host
+      - JWT_SECRET=${JWT_SECRET:-change-this-secret-in-production}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLINE_API_KEY=${CLINE_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3000
+    volumes:
+      - ./data:/app/data
+      - ./workspaces:/app/workspaces
+      - ./cline-backend-mvp/dist-standalone:/app/dist-standalone
+      - ./cline-backend-mvp/cline-host:/app/cline-host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+

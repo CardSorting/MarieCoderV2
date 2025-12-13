@@ -1,0 +1,410 @@
+---
+title: "Architecture Deep Dive"
+sidebarTitle: "Architecture"
+description: "Detailed architecture for using Cline as a headless backend service"
+---
+
+## System Architecture
+
+### Component Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Your Application Layer                    │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │  Web UI      │  │  REST API    │  │  WebSocket   │     │
+│  │  (React/Vue) │  │  (Express)   │  │  (Real-time) │     │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
+│         │                 │                  │              │
+│         └─────────────────┼──────────────────┘              │
+│                           │                                  │
+└───────────────────────────┼──────────────────────────────────┘
+                            │
+                            │ HTTP/REST
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  API Gateway Layer                           │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  gRPC Gateway (grpc-gateway or grpc-web)            │  │
+│  │  - REST to gRPC translation                          │  │
+│  │  - Authentication middleware                          │  │
+│  │  - Rate limiting                                      │  │
+│  │  - Request validation                                │  │
+│  └───────────────────────┬──────────────────────────────┘  │
+└──────────────────────────┼──────────────────────────────────┘
+                            │
+                            │ gRPC
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Cline Instance Manager                          │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Instance Registry (SQLite/Redis/PostgreSQL)         │  │
+│  │  - Track active instances                             │  │
+│  │  - Health monitoring                                  │  │
+│  │  - Port allocation                                    │  │
+│  └───────────────────────┬──────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Instance Lifecycle Manager                           │  │
+│  │  - Start/Stop instances                              │  │
+│  │  - Workspace provisioning                            │  │
+│  │  - Resource cleanup                                  │  │
+│  └───────────────────────┬──────────────────────────────┘  │
+└──────────────────────────┼──────────────────────────────────┘
+                            │
+                            │ Per User/Project
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Cline Core Instance (Per User)                 │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  gRPC Server (ProtoBus)                             │  │
+│  │  - Port: 26040 (configurable)                       │  │
+│  │  - Services: Task, File, State, Models, etc.        │  │
+│  └───────────────────────┬──────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Host Bridge Service                                 │  │
+│  │  - Port: 26041 (configurable)                        │  │
+│  │  - File system operations                            │  │
+│  │  - Terminal management                                │  │
+│  │  - Workspace operations                              │  │
+│  └───────────────────────┬──────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  Workspace Directory                                  │  │
+│  │  /workspaces/{userId}/{projectId}/                   │  │
+│  │  - Isolated file system                              │  │
+│  │  - Git repositories                                  │  │
+│  │  - Project files                                     │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Instance Management
+
+### Starting Instances
+
+Each user/project gets its own isolated Cline instance:
+
+```typescript
+class ClineInstanceManager {
+  async startInstance(userId: string, projectId: string) {
+    // 1. Create isolated workspace
+    const workspacePath = `/workspaces/${userId}/${projectId}`
+    await fs.mkdir(workspacePath, { recursive: true })
+    
+    // 2. Find available ports
+    const corePort = await findAvailablePort(26040, 27000)
+    const hostBridgePort = corePort + 1
+    
+    // 3. Start cline-host (host bridge)
+    const hostProcess = await spawn('cline-host', [
+      '--port', hostBridgePort.toString(),
+      '--verbose'
+    ], {
+      cwd: workspacePath,
+      env: {
+        ...process.env,
+        HOST_BRIDGE_ADDRESS: `127.0.0.1:${hostBridgePort}`
+      }
+    })
+    
+    // 4. Start cline-core
+    const coreProcess = await spawn('node', [
+      'dist-standalone/cline-core.js',
+      '--port', corePort.toString(),
+      '--host-bridge-port', hostBridgePort.toString(),
+      '--config', `${workspacePath}/.cline`
+    ], {
+      cwd: workspacePath,
+      env: {
+        ...process.env,
+        DEV_WORKSPACE_FOLDER: workspacePath,
+        PROTOBUS_ADDRESS: `127.0.0.1:${corePort}`,
+        HOST_BRIDGE_ADDRESS: `127.0.0.1:${hostBridgePort}`
+      }
+    })
+    
+    // 5. Wait for instance to be ready
+    await waitForInstanceReady(`127.0.0.1:${corePort}`)
+    
+    // 6. Register in instance registry
+    await this.registry.register({
+      instanceId: `${userId}-${projectId}`,
+      address: `127.0.0.1:${corePort}`,
+      hostBridgePort,
+      workspacePath,
+      userId,
+      projectId,
+      startedAt: new Date()
+    })
+    
+    return {
+      instanceId: `${userId}-${projectId}`,
+      address: `127.0.0.1:${corePort}`,
+      hostBridgePort
+    }
+  }
+}
+```
+
+### Instance Registry
+
+Track all active instances:
+
+```typescript
+interface InstanceInfo {
+  instanceId: string
+  address: string
+  hostBridgePort: number
+  workspacePath: string
+  userId: string
+  projectId: string
+  startedAt: Date
+  lastActivity: Date
+  status: 'starting' | 'running' | 'stopping' | 'stopped'
+}
+
+class InstanceRegistry {
+  // SQLite implementation (Cline's default)
+  // Or use Redis/PostgreSQL for distributed systems
+  
+  async register(instance: InstanceInfo): Promise<void>
+  async get(instanceId: string): Promise<InstanceInfo | null>
+  async listByUser(userId: string): Promise<InstanceInfo[]>
+  async updateActivity(instanceId: string): Promise<void>
+  async unregister(instanceId: string): Promise<void>
+}
+```
+
+### Health Monitoring
+
+Monitor instance health and cleanup stale instances:
+
+```typescript
+class HealthMonitor {
+  async checkHealth(address: string): Promise<boolean> {
+    try {
+      const client = createHealthClient(address)
+      const response = await client.check({ service: '' })
+      return response.status === 'SERVING'
+    } catch {
+      return false
+    }
+  }
+  
+  async cleanupStaleInstances() {
+    const instances = await this.registry.listAll()
+    
+    for (const instance of instances) {
+      const isHealthy = await this.checkHealth(instance.address)
+      
+      if (!isHealthy) {
+        // Instance is dead, clean it up
+        await this.cleanupInstance(instance.instanceId)
+      } else if (this.isInactive(instance)) {
+        // Instance inactive for too long, stop it
+        await this.stopInstance(instance.instanceId)
+      }
+    }
+  }
+}
+```
+
+## Workspace Isolation
+
+### Directory Structure
+
+```
+/workspaces/
+  ├── user-123/
+  │   ├── project-456/
+  │   │   ├── src/
+  │   │   ├── package.json
+  │   │   ├── .git/
+  │   │   └── .cline/          # Cline configuration
+  │   │       ├── config.json
+  │   │       └── locks.db      # Instance registry
+  │   └── project-789/
+  └── user-456/
+      └── project-123/
+```
+
+### Security Considerations
+
+1. **File System Isolation**
+   - Use separate directories per user/project
+   - Set appropriate file permissions
+   - Consider containerization (Docker) for stronger isolation
+
+2. **Process Isolation**
+   - Each instance runs in separate process
+   - Consider using containers or VMs for stronger isolation
+   - Limit resource usage (CPU, memory)
+
+3. **Network Isolation**
+   - Each instance uses separate ports
+   - Use firewall rules to restrict access
+   - Consider network namespaces
+
+## gRPC to HTTP Gateway
+
+### Using grpc-gateway
+
+```typescript
+import { createGateway } from '@grpc-ecosystem/grpc-gateway'
+
+const gateway = createGateway({
+  // Map REST endpoints to gRPC services
+  '/api/v1/tasks': {
+    service: 'cline.TaskService',
+    method: 'newTask',
+    transform: (req) => ({
+      metadata: {},
+      text: req.body.prompt,
+      files: req.body.files || [],
+      images: req.body.images || [],
+      task_settings: {
+        auto_approve_actions: {
+          read_files: true,
+          write_files: true,
+          run_commands: true
+        }
+      }
+    })
+  },
+  
+  '/api/v1/tasks/:id': {
+    service: 'cline.TaskService',
+    method: 'showTaskWithId',
+    transform: (req) => ({
+      value: req.params.id
+    })
+  },
+  
+  '/api/v1/files': {
+    service: 'cline.FileService',
+    method: 'searchFiles',
+    transform: (req) => ({
+      query: req.query.q,
+      max_results: parseInt(req.query.limit) || 10
+    })
+  }
+})
+```
+
+### Using grpc-web
+
+For browser-based clients:
+
+```typescript
+import { ClineClient } from '@cline/grpc-web-client'
+
+const client = new ClineClient('https://api.yourservice.com', {
+  // Authentication
+  headers: {
+    'Authorization': `Bearer ${token}`
+  }
+})
+
+// Use in browser
+const taskId = await client.Task.newTask({
+  text: 'Create a REST API',
+  files: []
+})
+```
+
+## Real-time Updates
+
+### WebSocket Bridge
+
+Bridge gRPC streaming to WebSocket:
+
+```typescript
+app.ws('/api/v1/tasks/:id/stream', async (ws, req) => {
+  const instance = await getInstanceForUser(req.userId)
+  const client = new ClineClient(instance.address)
+  await client.connect()
+  
+  // Subscribe to state updates
+  const stateStream = client.State.subscribeToState({})
+  
+  stateStream.on('data', (state) => {
+    ws.send(JSON.stringify({
+      type: 'state_update',
+      data: {
+        currentTask: state.currentTask,
+        taskHistory: state.taskHistory
+      }
+    }))
+  })
+  
+  // Subscribe to task-specific updates
+  const taskId = req.params.id
+  const taskStream = client.Task.subscribeToTaskUpdates({ taskId })
+  
+  taskStream.on('data', (update) => {
+    ws.send(JSON.stringify({
+      type: 'task_update',
+      data: {
+        status: update.status,
+        messages: update.messages,
+        changes: update.changes
+      }
+    }))
+  })
+  
+  // Handle WebSocket close
+  ws.on('close', () => {
+    stateStream.cancel()
+    taskStream.cancel()
+    client.disconnect()
+  })
+})
+```
+
+## Scaling Considerations
+
+### Horizontal Scaling
+
+1. **Load Balancing**
+   - Use load balancer for API gateway
+   - Distribute instances across multiple servers
+   - Consider instance affinity (stickiness)
+
+2. **Instance Pooling**
+   - Pre-create instance pool for faster startup
+   - Implement instance reuse for active users
+   - Auto-scale based on demand
+
+3. **Distributed Registry**
+   - Use Redis or PostgreSQL instead of SQLite
+   - Enable instance discovery across servers
+   - Implement distributed locking
+
+### Resource Management
+
+1. **Instance Limits**
+   - Limit instances per user
+   - Implement instance quotas
+   - Auto-stop inactive instances
+
+2. **Resource Limits**
+   - Set CPU/memory limits per instance
+   - Use container resource limits
+   - Monitor and alert on resource usage
+
+3. **Cost Optimization**
+   - Stop instances after inactivity
+   - Use spot instances for non-critical workloads
+   - Implement usage-based billing
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Implementation Guide" icon="code" href="/integrations/headless-backend/implementation">
+    Step-by-step implementation guide
+  </Card>
+  
+  <Card title="API Reference" icon="book" href="/integrations/headless-backend/api-reference">
+    Complete API documentation
+  </Card>
+</CardGroup>
+

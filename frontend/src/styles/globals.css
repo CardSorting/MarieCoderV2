@@ -1,0 +1,549 @@
+@import "tailwindcss";
+
+/* ============================================================================
+   VS Code Inspired Theme - GitHub Dark Dimmed
+   Premium IDE aesthetics with sophisticated color harmony
+   ============================================================================ */
+
+@theme {
+  /* --------------------------------------------------------------------------
+     Surface Colors (GitHub Dark Dimmed)
+     Sophisticated dark palette with warm undertones
+     -------------------------------------------------------------------------- */
+  --color-surface-primary: #0d1117;
+  --color-surface-secondary: #161b22;
+  --color-surface-tertiary: #21262d;
+  --color-surface-elevated: #30363d;
+  --color-surface-overlay: #484f58;
+
+  /* --------------------------------------------------------------------------
+     Border Colors
+     Subtle separation without visual noise
+     -------------------------------------------------------------------------- */
+  --color-border-primary: #21262d;
+  --color-border-secondary: #30363d;
+  --color-border-active: #58a6ff;
+  --color-border-focus: #58a6ff;
+
+  /* --------------------------------------------------------------------------
+     Text Colors
+     High contrast hierarchy for excellent readability
+     -------------------------------------------------------------------------- */
+  --color-text-primary: #c9d1d9;
+  --color-text-secondary: #8b949e;
+  --color-text-muted: #6e7681;
+  --color-text-bright: #f0f6fc;
+  --color-text-link: #58a6ff;
+
+  /* --------------------------------------------------------------------------
+     Accent Colors
+     GitHub's iconic blue with supporting variants
+     -------------------------------------------------------------------------- */
+  --color-accent-primary: #238636;
+  --color-accent-secondary: #2ea043;
+  --color-accent-bright: #58a6ff;
+  --color-accent-muted: #388bfd33;
+
+  /* --------------------------------------------------------------------------
+     Status Colors
+     Clear, accessible status indicators
+     -------------------------------------------------------------------------- */
+  --color-status-success: #3fb950;
+  --color-status-warning: #d29922;
+  --color-status-error: #f85149;
+  --color-status-info: #58a6ff;
+
+  /* --------------------------------------------------------------------------
+     Syntax Highlighting (GitHub Dark)
+     -------------------------------------------------------------------------- */
+  --color-syntax-keyword: #ff7b72;
+  --color-syntax-string: #a5d6ff;
+  --color-syntax-number: #79c0ff;
+  --color-syntax-comment: #8b949e;
+  --color-syntax-function: #d2a8ff;
+  --color-syntax-variable: #c9d1d9;
+  --color-syntax-type: #7ee787;
+  --color-syntax-constant: #79c0ff;
+  --color-syntax-class: #ffa657;
+  --color-syntax-operator: #ff7b72;
+
+  /* --------------------------------------------------------------------------
+     File Icon Colors
+     -------------------------------------------------------------------------- */
+  --color-icon-folder: #e8ab53;
+  --color-icon-folder-open: #dcb67a;
+  --color-icon-typescript: #3178c6;
+  --color-icon-javascript: #f0db4f;
+  --color-icon-react: #61dafb;
+  --color-icon-json: #cbcb41;
+  --color-icon-css: #42a5f5;
+  --color-icon-html: #e34c26;
+  --color-icon-python: #3776ab;
+  --color-icon-markdown: #519aba;
+  --color-icon-git: #f05032;
+  --color-icon-default: #8b949e;
+
+  /* --------------------------------------------------------------------------
+     Typography
+     Premium monospace + system UI stack
+     -------------------------------------------------------------------------- */
+  --font-family-sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-family-mono: "JetBrains Mono", "Fira Code", "SF Mono", "Monaco", "Cascadia Code", "Consolas", monospace;
+
+  /* Font Sizes */
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 13px;
+  --font-size-lg: 14px;
+  --font-size-xl: 16px;
+  --font-size-2xl: 18px;
+
+  /* --------------------------------------------------------------------------
+     Layout Dimensions
+     -------------------------------------------------------------------------- */
+  --spacing-activity-bar: 48px;
+  --spacing-sidebar: 260px;
+  --spacing-sidebar-min: 170px;
+  --spacing-sidebar-max: 500px;
+  --spacing-panel: 280px;
+  --spacing-panel-min: 100px;
+  --spacing-status-bar: 22px;
+  --spacing-title-bar: 35px;
+  --spacing-tab: 35px;
+  --spacing-breadcrumb: 22px;
+
+  /* --------------------------------------------------------------------------
+     Shadows
+     Layered depth for elevated surfaces
+     -------------------------------------------------------------------------- */
+  --shadow-sm: 0 1px 2px rgba(1, 4, 9, 0.5);
+  --shadow-md: 0 3px 6px rgba(1, 4, 9, 0.4), 0 1px 2px rgba(1, 4, 9, 0.3);
+  --shadow-lg: 0 8px 24px rgba(1, 4, 9, 0.5), 0 3px 6px rgba(1, 4, 9, 0.3);
+  --shadow-xl: 0 16px 48px rgba(1, 4, 9, 0.6), 0 4px 8px rgba(1, 4, 9, 0.4);
+  --shadow-glow: 0 0 8px rgba(88, 166, 255, 0.3);
+
+  /* --------------------------------------------------------------------------
+     Border Radius
+     -------------------------------------------------------------------------- */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  /* --------------------------------------------------------------------------
+     Transitions
+     -------------------------------------------------------------------------- */
+  --duration-fast: 100ms;
+  --duration-normal: 150ms;
+  --duration-slow: 250ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  /* --------------------------------------------------------------------------
+     Animations
+     -------------------------------------------------------------------------- */
+  --animate-fade-in: fade-in 0.2s var(--ease-out);
+  --animate-fade-in-up: fade-in-up 0.2s var(--ease-out);
+  --animate-fade-in-down: fade-in-down 0.2s var(--ease-out);
+  --animate-slide-in-left: slide-in-left 0.2s var(--ease-out);
+  --animate-slide-in-right: slide-in-right 0.2s var(--ease-out);
+  --animate-scale-in: scale-in 0.15s var(--ease-out);
+  --animate-shimmer: shimmer 2s infinite linear;
+  --animate-pulse-glow: pulse-glow 2s infinite ease-in-out;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes fade-in-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes fade-in-down {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes slide-in-left {
+    from { opacity: 0; transform: translateX(-12px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  @keyframes slide-in-right {
+    from { opacity: 0; transform: translateX(12px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  @keyframes scale-in {
+    from { opacity: 0; transform: scale(0.96); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 4px rgba(88, 166, 255, 0.3); }
+    50% { box-shadow: 0 0 12px rgba(88, 166, 255, 0.6); }
+  }
+
+  @keyframes bounce-dots {
+    0%, 80%, 100% { transform: translateY(0); }
+    40% { transform: translateY(-6px); }
+  }
+}
+
+/* ============================================================================
+   Base Styles
+   ============================================================================ */
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  background-color: var(--color-surface-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#__next {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+code, pre, .mono {
+  font-family: var(--font-family-mono);
+  font-feature-settings: "calt" 1, "liga" 1;
+}
+
+a {
+  color: var(--color-text-link);
+  text-decoration: none;
+  transition: color var(--duration-fast) ease;
+}
+
+a:hover {
+  color: var(--color-accent-bright);
+  text-decoration: underline;
+}
+
+:focus-visible {
+  outline: 1px solid var(--color-border-focus);
+  outline-offset: -1px;
+}
+
+::selection {
+  background: var(--color-accent-muted);
+  color: var(--color-text-bright);
+}
+
+/* ============================================================================
+   Tailwind Utility Extensions
+   ============================================================================ */
+
+/* Text Color Shortcuts */
+@utility text-primary {
+  color: var(--color-text-primary);
+}
+
+@utility text-secondary {
+  color: var(--color-text-secondary);
+}
+
+@utility text-muted {
+  color: var(--color-text-muted);
+}
+
+@utility text-bright {
+  color: var(--color-text-bright);
+}
+
+/* Background Shortcuts */
+@utility bg-primary {
+  background-color: var(--color-surface-primary);
+}
+
+@utility bg-secondary {
+  background-color: var(--color-surface-secondary);
+}
+
+@utility bg-tertiary {
+  background-color: var(--color-surface-tertiary);
+}
+
+@utility bg-elevated {
+  background-color: var(--color-surface-elevated);
+}
+
+/* ============================================================================
+   Custom Scrollbars - VS Code Style
+   ============================================================================ */
+
+::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(110, 118, 129, 0.4);
+  border-radius: 7px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(110, 118, 129, 0.7);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Thin scrollbar variant */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+}
+
+/* Hidden scrollbar */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ============================================================================
+   Monaco Editor Overrides
+   ============================================================================ */
+
+.monaco-editor {
+  --vscode-editor-background: var(--color-surface-primary) !important;
+}
+
+.monaco-editor .margin {
+  background: var(--color-surface-primary) !important;
+}
+
+.monaco-editor .minimap {
+  opacity: 0.6;
+  transition: opacity 200ms ease;
+}
+
+.monaco-editor:hover .minimap {
+  opacity: 1;
+}
+
+.monaco-editor .suggest-widget {
+  border-radius: var(--radius-md) !important;
+  border: 1px solid var(--color-border-secondary) !important;
+  box-shadow: var(--shadow-lg) !important;
+  background: var(--color-surface-secondary) !important;
+}
+
+.monaco-editor .parameter-hints-widget {
+  border-radius: var(--radius-md) !important;
+  border: 1px solid var(--color-border-secondary) !important;
+  background: var(--color-surface-secondary) !important;
+}
+
+.monaco-editor .monaco-hover {
+  border-radius: var(--radius-md) !important;
+  border: 1px solid var(--color-border-secondary) !important;
+  background: var(--color-surface-secondary) !important;
+}
+
+/* ============================================================================
+   XTerm Terminal Overrides
+   ============================================================================ */
+
+.xterm {
+  padding: 12px;
+}
+
+.xterm-viewport {
+  overflow-y: auto !important;
+}
+
+.xterm-viewport::-webkit-scrollbar {
+  width: 14px;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(110, 118, 129, 0.4);
+  border-radius: 7px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(110, 118, 129, 0.7);
+}
+
+/* ============================================================================
+   Animation Utilities
+   ============================================================================ */
+
+.animate-fade-in {
+  animation: var(--animate-fade-in);
+}
+
+.animate-fade-in-up {
+  animation: var(--animate-fade-in-up);
+}
+
+.animate-fade-in-down {
+  animation: var(--animate-fade-in-down);
+}
+
+.animate-slide-in-left {
+  animation: var(--animate-slide-in-left);
+}
+
+.animate-slide-in-right {
+  animation: var(--animate-slide-in-right);
+}
+
+.animate-scale-in {
+  animation: var(--animate-scale-in);
+}
+
+.animate-shimmer {
+  animation: var(--animate-shimmer);
+}
+
+.animate-pulse-glow {
+  animation: var(--animate-pulse-glow);
+}
+
+.animate-bounce-dots {
+  animation: bounce-dots 1.4s ease-in-out infinite both;
+}
+
+/* ============================================================================
+   Layout Utilities
+   ============================================================================ */
+
+.h-activity-bar {
+  height: var(--spacing-activity-bar);
+}
+
+.w-activity-bar {
+  width: var(--spacing-activity-bar);
+}
+
+.h-status-bar {
+  height: var(--spacing-status-bar);
+}
+
+.h-title-bar {
+  height: var(--spacing-title-bar);
+}
+
+.h-tab {
+  height: var(--spacing-tab);
+}
+
+.h-breadcrumb {
+  height: var(--spacing-breadcrumb);
+}
+
+/* ============================================================================
+   Component Utility Classes
+   ============================================================================ */
+
+/* Resize Handle */
+.resize-handle {
+  background: transparent;
+  transition: background var(--duration-fast) ease;
+  flex-shrink: 0;
+}
+
+.resize-handle:hover {
+  background: var(--color-accent-bright);
+  opacity: 0.5;
+}
+
+.resize-handle-horizontal {
+  width: 4px;
+  cursor: col-resize;
+}
+
+.resize-handle-vertical {
+  width: 100%;
+  height: 4px;
+  cursor: row-resize;
+}
+
+/* Skeleton Loader */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-tertiary) 0%,
+    var(--color-surface-elevated) 50%,
+    var(--color-surface-tertiary) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite linear;
+  border-radius: var(--radius-sm);
+}
+
+/* Glass effect for overlays */
+.glass {
+  background: rgba(22, 27, 34, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* Gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, var(--color-status-success), var(--color-accent-bright));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Focus ring */
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-surface-primary), 0 0 0 4px var(--color-accent-bright);
+}
+
+/* Truncate with ellipsis */
+.truncate-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

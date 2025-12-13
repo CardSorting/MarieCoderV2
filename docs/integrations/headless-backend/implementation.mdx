@@ -1,0 +1,2108 @@
+---
+title: "Implementation Guide"
+sidebarTitle: "Implementation"
+description: "Step-by-step guide to implementing Cline as a headless backend service"
+---
+
+This guide walks you through implementing a Replit-like service powered by Cline.
+
+## Quick Start
+
+Get a minimal MVP running in 5 minutes:
+
+```bash
+# 1. Clone and build Cline
+git clone https://github.com/cline/cline.git
+cd cline
+npm install
+npm run compile-standalone
+
+# 2. Create your backend project
+mkdir cline-backend && cd cline-backend
+npm init -y
+npm install express @grpc/grpc-js @grpc/proto-loader dotenv
+
+# 3. Copy the complete example (see Step 18)
+# 4. Set environment variables
+cp .env.example .env
+# Edit .env with your paths and API keys
+
+# 5. Run
+npm start
+```
+
+See **Step 18: Complete Working Example** for the full implementation.
+
+## Key Implementation Points
+
+Before diving in, understand these critical aspects:
+
+1. **Two-Process Architecture**: Each instance requires both `cline-host` (host bridge) and `cline-core` (main service)
+2. **Port Allocation**: Use OS-allocated ports (port 0) to avoid conflicts, not hardcoded ranges
+3. **Workspace Isolation**: Set `DEV_WORKSPACE_FOLDER` environment variable to isolate user workspaces
+4. **Instance Registry**: Instances self-register in SQLite (`~/.cline/locks.db`) for discovery
+5. **Health Checks**: Use gRPC health check service to verify instance readiness
+6. **Graceful Shutdown**: Always use SIGTERM first, then SIGKILL if needed
+7. **Logging**: Monitor logs in `~/.cline/logs/` for debugging
+
+## Prerequisites
+
+- Node.js 18+ installed
+- Cline codebase cloned and built (`npm run compile-standalone`)
+- `cline-host` binary available (from CLI build or npm package)
+- Understanding of gRPC and REST APIs
+- Basic knowledge of TypeScript/JavaScript
+- Understanding of process management and port allocation
+
+## Step 1: Build Standalone Cline
+
+First, build the standalone version of Cline:
+
+```bash
+cd cline-main
+npm install
+npm run compile-standalone
+```
+
+This creates `dist-standalone/cline-core.js` and required files.
+
+## Step 2: Create Instance Manager
+
+Create a service to manage Cline instances. This implementation follows the patterns used in Cline's CLI:
+
+```typescript
+// src/services/cline-instance-manager.ts
+import { spawn, ChildProcess } from 'child_process'
+import * as net from 'net'
+import * as fs from 'fs/promises'
+import * as path from 'path'
+import * as os from 'os'
+import * as grpc from '@grpc/grpc-js'
+import * as protoLoader from '@grpc/proto-loader'
+import * as health from 'grpc-health-check'
+import { ClineClient } from './cline-client'
+
+interface InstanceInfo {
+  instanceId: string
+  address: string
+  hostBridgePort: number
+  workspacePath: string
+  clineDataDir: string
+  userId: string
+  projectId: string
+  coreProcess?: ChildProcess
+  hostProcess?: ChildProcess
+  startedAt: Date
+  lastActivity: Date
+}
+
+export class ClineInstanceManager {
+  private instances: Map<string, InstanceInfo> = new Map()
+  private clineConfigPath: string
+  
+  constructor(
+    private clineCorePath: string,
+    private clineHostPath: string,
+    private baseWorkspaceDir: string,
+    private baseClineDir?: string
+  ) {
+    // Default Cline config directory (~/.cline)
+    this.clineConfigPath = baseClineDir || path.join(os.homedir(), '.cline')
+  }
+  
+  /**
+   * Find available ports by letting the OS allocate them (like Cline CLI does)
+   */
+  private async findAvailablePortPair(): Promise<[number, number]> {
+    return new Promise((resolve, reject) => {
+      const coreServer = net.createServer()
+      const hostServer = net.createServer()
+      
+      coreServer.listen(0, () => {
+        const corePort = (coreServer.address() as net.AddressInfo).port
+        hostServer.listen(0, () => {
+          const hostPort = (hostServer.address() as net.AddressInfo).port
+          coreServer.close()
+          hostServer.close()
+          resolve([corePort, hostPort])
+        })
+        hostServer.on('error', reject)
+      })
+      coreServer.on('error', reject)
+    })
+  }
+  
+  async startInstance(
+    userId: string,
+    projectId: string
+  ): Promise<InstanceInfo> {
+    const instanceId = `${userId}-${projectId}`
+    
+    // Check if instance already exists and is healthy
+    const existing = this.instances.get(instanceId)
+    if (existing) {
+      const isHealthy = await this.checkHealth(existing.address)
+      if (isHealthy) {
+        existing.lastActivity = new Date()
+        return existing
+      }
+      // Instance exists but unhealthy, clean it up
+      await this.stopInstance(instanceId)
+    }
+    
+    // Create workspace directory
+    const workspacePath = path.join(this.baseWorkspaceDir, userId, projectId)
+    await fs.mkdir(workspacePath, { recursive: true })
+    
+    // Create per-instance Cline data directory
+    const clineDataDir = path.join(this.clineConfigPath, 'instances', instanceId)
+    await fs.mkdir(clineDataDir, { recursive: true })
+    
+    // Allocate ports (let OS choose available ports)
+    const [corePort, hostBridgePort] = await this.findAvailablePortPair()
+    
+    // Create logs directory
+    const logsDir = path.join(clineDataDir, 'logs')
+    await fs.mkdir(logsDir, { recursive: true })
+    
+    // Start host bridge first (cline-host)
+    const hostLogFile = path.join(
+      logsDir,
+      `cline-host-${Date.now()}-${hostBridgePort}.log`
+    )
+    const hostLogFd = await fs.open(hostLogFile, 'w')
+    
+    const hostProcess = spawn(this.clineHostPath, [
+      '--verbose',
+      '--port', hostBridgePort.toString()
+    ], {
+      cwd: workspacePath,
+      stdio: ['ignore', hostLogFd.fd, hostLogFd.fd],
+      detached: false
+    })
+    
+    // Wait for host bridge to be ready (gRPC health check)
+    await this.waitForHostBridge(hostBridgePort, 30000)
+    
+    // Start cline-core
+    const coreLogFile = path.join(
+      logsDir,
+      `cline-core-${Date.now()}-${corePort}.log`
+    )
+    const coreLogFd = await fs.open(coreLogFile, 'w')
+    
+    // Determine install directory (where cline-core.js and node_modules are)
+    const installDir = path.dirname(this.clineCorePath)
+    const realNodeModules = path.join(installDir, 'node_modules')
+    const fakeNodeModules = path.join(installDir, 'fake_node_modules')
+    const nodePath = `${realNodeModules}${path.delimiter}${fakeNodeModules}`
+    
+    const coreProcess = spawn('node', [
+      this.clineCorePath,
+      '--port', corePort.toString(),
+      '--host-bridge-port', hostBridgePort.toString(),
+      '--config', clineDataDir
+    ], {
+      cwd: installDir, // Must be install directory, not workspace
+      stdio: ['ignore', coreLogFd.fd, coreLogFd.fd],
+      detached: false,
+      env: {
+        ...process.env,
+        DEV_WORKSPACE_FOLDER: workspacePath, // Critical: sets workspace
+        WORKSPACE_STORAGE_DIR: path.join(clineDataDir, 'workspace'),
+        PROTOBUS_ADDRESS: `127.0.0.1:${corePort}`,
+        HOST_BRIDGE_ADDRESS: `127.0.0.1:${hostBridgePort}`,
+        NODE_PATH: nodePath,
+        NODE_ENV: 'production',
+        CLINE_DIR: clineDataDir,
+        INSTALL_DIR: installDir
+      }
+    })
+    
+    // Wait for core to register in SQLite and be ready
+    await this.waitForCoreReady(corePort, 60000)
+    
+    // Create instance info
+    const instance: InstanceInfo = {
+      instanceId,
+      address: `127.0.0.1:${corePort}`,
+      hostBridgePort,
+      workspacePath,
+      clineDataDir,
+      userId,
+      projectId,
+      coreProcess,
+      hostProcess,
+      startedAt: new Date(),
+      lastActivity: new Date()
+    }
+    
+    this.instances.set(instanceId, instance)
+    
+    // Clean up log file descriptors
+    hostLogFd.close()
+    coreLogFd.close()
+    
+    return instance
+  }
+  
+  async stopInstance(instanceId: string): Promise<void> {
+    const instance = this.instances.get(instanceId)
+    if (!instance) return
+    
+    try {
+      // Try graceful shutdown via gRPC first
+      try {
+        const client = new ClineClient(instance.address)
+        await client.connect()
+        // Cline-core will handle graceful shutdown on SIGTERM
+        await client.disconnect()
+      } catch (error) {
+        console.warn(`Failed to gracefully shutdown ${instanceId}:`, error)
+      }
+      
+      // Send SIGTERM to processes
+      if (instance.coreProcess && !instance.coreProcess.killed) {
+        instance.coreProcess.kill('SIGTERM')
+        // Wait up to 5 seconds for graceful shutdown
+        await Promise.race([
+          new Promise(resolve => instance.coreProcess!.once('exit', resolve)),
+          new Promise(resolve => setTimeout(resolve, 5000))
+        ])
+        
+        // Force kill if still running
+        if (!instance.coreProcess.killed) {
+          instance.coreProcess.kill('SIGKILL')
+        }
+      }
+      
+      if (instance.hostProcess && !instance.hostProcess.killed) {
+        instance.hostProcess.kill('SIGTERM')
+        await Promise.race([
+          new Promise(resolve => instance.hostProcess!.once('exit', resolve)),
+          new Promise(resolve => setTimeout(resolve, 2000))
+        ])
+        
+        if (!instance.hostProcess.killed) {
+          instance.hostProcess.kill('SIGKILL')
+        }
+      }
+    } catch (error) {
+      console.error(`Error stopping instance ${instanceId}:`, error)
+    } finally {
+      this.instances.delete(instanceId)
+    }
+  }
+  
+  getInstance(instanceId: string): InstanceInfo | undefined {
+    return this.instances.get(instanceId)
+  }
+  
+  private async waitForHostBridge(port: number, timeout = 30000): Promise<void> {
+    const start = Date.now()
+    while (Date.now() - start < timeout) {
+      try {
+        const healthDef = protoLoader.loadSync(health.protoPath)
+        const grpcObj = grpc.loadPackageDefinition(healthDef) as any
+        const Health = grpcObj.grpc.health.v1.Health
+        const client = new Health(
+          `127.0.0.1:${port}`,
+          grpc.credentials.createInsecure(),
+          { 'grpc.enable_http_proxy': 0 }
+        )
+        
+        const response = await new Promise<any>((resolve, reject) => {
+          client.check({ service: '' }, (err: any, resp: any) => {
+            if (err) reject(err)
+            else resolve(resp)
+          })
+        })
+        
+        if (response?.status === 1) { // SERVING
+          client.close()
+          return
+        }
+        client.close()
+      } catch {
+        // Not ready yet
+      }
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+    throw new Error(`Host bridge not ready after ${timeout}ms`)
+  }
+  
+  private async waitForCoreReady(port: number, timeout = 60000): Promise<void> {
+    const start = Date.now()
+    const address = `127.0.0.1:${port}`
+    
+    while (Date.now() - start < timeout) {
+      try {
+        // Check health
+        const isHealthy = await this.checkHealth(address)
+        if (isHealthy) {
+          // Also check if registered in SQLite (optional, but recommended)
+          // The instance self-registers in ~/.cline/locks.db
+          return
+        }
+      } catch {
+        // Not ready yet
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+    throw new Error(`Core not ready after ${timeout}ms`)
+  }
+  
+  private async checkHealth(address: string): Promise<boolean> {
+    try {
+      const healthDef = protoLoader.loadSync(health.protoPath)
+      const grpcObj = grpc.loadPackageDefinition(healthDef) as any
+      const Health = grpcObj.grpc.health.v1.Health
+      const client = new Health(
+        address,
+        grpc.credentials.createInsecure(),
+        { 'grpc.enable_http_proxy': 0 }
+      )
+      
+      const response = await new Promise<any>((resolve, reject) => {
+        client.check({ service: '' }, (err: any, resp: any) => {
+          if (err) reject(err)
+          else resolve(resp)
+        })
+      })
+      
+      const isHealthy = response?.status === 1 // SERVING
+      client.close()
+      return isHealthy
+    } catch {
+      return false
+    }
+  }
+}
+```
+
+## Step 3: Create gRPC Client Wrapper
+
+Create a wrapper for the Cline gRPC client. You have two options:
+
+### Option A: Using Generated TypeScript Clients (Recommended)
+
+If you have access to Cline's generated gRPC clients:
+
+```typescript
+// src/services/cline-client.ts
+import { TaskServiceClient } from '@cline-grpc/task'
+import { FileServiceClient } from '@cline-grpc/file'
+import { StateServiceClient } from '@cline-grpc/state'
+import { ModelsServiceClient } from '@cline-grpc/models'
+import { credentials } from '@grpc/grpc-js'
+import { promisify } from 'util'
+
+export class ClineClient {
+  private taskClient: TaskServiceClient
+  private fileClient: FileServiceClient
+  private stateClient: StateServiceClient
+  private modelsClient: ModelsServiceClient
+  
+  constructor(private address: string) {
+    const creds = credentials.createInsecure()
+    const options = { 'grpc.enable_http_proxy': 0 }
+    
+    this.taskClient = new TaskServiceClient(address, creds, options)
+    this.fileClient = new FileServiceClient(address, creds, options)
+    this.stateClient = new StateServiceClient(address, creds, options)
+    this.modelsClient = new ModelsServiceClient(address, creds, options)
+  }
+  
+  async connect(): Promise<void> {
+    // Clients are ready immediately, but you can verify with health check
+    // Connection is lazy - happens on first call
+  }
+  
+  async createTask(prompt: string, files?: string[]): Promise<string> {
+    const newTask = promisify(this.taskClient.newTask.bind(this.taskClient))
+    const response = await newTask({
+      metadata: {},
+      text: prompt,
+      files: files || [],
+      images: [],
+      task_settings: {
+        auto_approve_actions: {
+          read_files: true,
+          write_files: true,
+          run_commands: true
+        }
+      }
+    })
+    return response.value
+  }
+  
+  async getTask(taskId: string): Promise<any> {
+    const showTask = promisify(this.taskClient.showTaskWithId.bind(this.taskClient))
+    return await showTask({ value: taskId })
+  }
+  
+  async searchFiles(query: string, maxResults = 10): Promise<string[]> {
+    const searchFiles = promisify(this.fileClient.searchFiles.bind(this.fileClient))
+    const response = await searchFiles({
+      metadata: {},
+      query,
+      max_results: maxResults
+    })
+    return response.results?.map(r => r.path) || []
+  }
+  
+  async updateApiConfiguration(secrets: any, options: any): Promise<void> {
+    const updateConfig = promisify(
+      this.modelsClient.updateApiConfiguration.bind(this.modelsClient)
+    )
+    await updateConfig({
+      metadata: {},
+      secrets,
+      options
+    })
+  }
+  
+  subscribeToState(callback: (state: any) => void): any {
+    const call = this.stateClient.subscribeToState({})
+    call.on('data', (state) => {
+      callback(state.toObject ? state.toObject() : state)
+    })
+    call.on('error', (err: any) => {
+      console.error('State stream error:', err)
+    })
+    return call
+  }
+  
+  disconnect(): void {
+    this.taskClient.close()
+    this.fileClient.close()
+    this.stateClient.close()
+    this.modelsClient.close()
+  }
+}
+```
+
+### Option B: Using Proto Loader (If Generated Clients Unavailable)
+
+If you need to load proto files directly:
+
+```typescript
+// src/services/cline-client.ts
+import * as grpc from '@grpc/grpc-js'
+import * as protoLoader from '@grpc/proto-loader'
+import * as path from 'path'
+import { promisify } from 'util'
+
+export class ClineClient {
+  private clients: any = {}
+  private protoPath: string
+  
+  constructor(
+    private address: string,
+    protoDir: string = './proto' // Path to proto directory
+  ) {
+    this.protoPath = protoDir
+  }
+  
+  async connect(): Promise<void> {
+    // Load all proto files
+    const protoFiles = [
+      'cline/task.proto',
+      'cline/file.proto',
+      'cline/state.proto',
+      'cline/models.proto',
+      'cline/common.proto'
+    ]
+    
+    const packageDefinition = await protoLoader.load(
+      protoFiles.map(f => path.join(this.protoPath, f)),
+      {
+        keepCase: true,
+        longs: String,
+        enums: String,
+        defaults: true,
+        oneofs: true,
+        includeDirs: [this.protoPath]
+      }
+    )
+    
+    const proto = grpc.loadPackageDefinition(packageDefinition) as any
+    
+    const creds = grpc.credentials.createInsecure()
+    const options = { 'grpc.enable_http_proxy': 0 }
+    
+    this.clients = {
+      Task: new proto.cline.TaskService(this.address, creds, options),
+      File: new proto.cline.FileService(this.address, creds, options),
+      State: new proto.cline.StateService(this.address, creds, options),
+      Models: new proto.cline.ModelsService(this.address, creds, options)
+    }
+  }
+  
+  async createTask(prompt: string, files?: string[]): Promise<string> {
+    const newTask = promisify(this.clients.Task.newTask.bind(this.clients.Task))
+    const response = await newTask({
+      metadata: {},
+      text: prompt,
+      files: files || [],
+      images: [],
+      task_settings: {
+        auto_approve_actions: {
+          read_files: true,
+          write_files: true,
+          run_commands: true
+        }
+      }
+    })
+    return response.value
+  }
+  
+  async getTask(taskId: string): Promise<any> {
+    const showTask = promisify(
+      this.clients.Task.showTaskWithId.bind(this.clients.Task)
+    )
+    return await showTask({ value: taskId })
+  }
+  
+  async searchFiles(query: string, maxResults = 10): Promise<string[]> {
+    const searchFiles = promisify(
+      this.clients.File.searchFiles.bind(this.clients.File)
+    )
+    const response = await searchFiles({
+      metadata: {},
+      query,
+      max_results: maxResults
+    })
+    return response.results?.map((r: any) => r.path) || []
+  }
+  
+  async updateApiConfiguration(secrets: any, options: any): Promise<void> {
+    const updateConfig = promisify(
+      this.clients.Models.updateApiConfiguration.bind(this.clients.Models)
+    )
+    await updateConfig({
+      metadata: {},
+      secrets,
+      options
+    })
+  }
+  
+  subscribeToState(callback: (state: any) => void): any {
+    const call = this.clients.State.subscribeToState({})
+    call.on('data', callback)
+    call.on('error', (err: any) => console.error('State stream error:', err))
+    return call
+  }
+  
+  disconnect(): void {
+    Object.values(this.clients).forEach((client: any) => {
+      if (client && typeof client.close === 'function') {
+        client.close()
+      }
+    })
+  }
+}
+```
+
+## Step 4: Create REST API Gateway
+
+Create Express.js server with REST endpoints:
+
+```typescript
+// src/api/server.ts
+import express from 'express'
+import { ClineInstanceManager } from '../services/cline-instance-manager'
+import { ClineClient } from '../services/cline-client'
+
+const app = express()
+app.use(express.json())
+
+const instanceManager = new ClineInstanceManager(
+  './dist-standalone/cline-core.js',
+  './cline-host',
+  './workspaces'
+)
+
+// Middleware to get instance for user
+async function getInstance(req: any, res: any, next: any) {
+  const userId = req.headers['x-user-id'] // From auth middleware
+  const projectId = req.params.projectId || req.body.projectId
+  
+  if (!userId || !projectId) {
+    return res.status(400).json({ error: 'Missing userId or projectId' })
+  }
+  
+  const instance = await instanceManager.startInstance(userId, projectId)
+  req.instance = instance
+  req.clineClient = new ClineClient(instance.address)
+  await req.clineClient.connect()
+  
+  next()
+}
+
+// Create task
+app.post('/api/v1/projects/:projectId/tasks', getInstance, async (req, res) => {
+  try {
+    const { prompt, files } = req.body
+    const taskId = await req.clineClient.createTask(prompt, files)
+    
+    res.json({ taskId })
+  } catch (error: any) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Get task status
+app.get('/api/v1/projects/:projectId/tasks/:taskId', getInstance, async (req, res) => {
+  try {
+    const task = await req.clineClient.getTask(req.params.taskId)
+    res.json(task)
+  } catch (error: any) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Search files
+app.get('/api/v1/projects/:projectId/files/search', getInstance, async (req, res) => {
+  try {
+    const { q, limit } = req.query
+    const files = await req.clineClient.searchFiles(
+      q as string,
+      limit ? parseInt(limit as string) : 10
+    )
+    res.json({ files })
+  } catch (error: any) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// WebSocket for real-time updates
+import { WebSocketServer } from 'ws'
+const wss = new WebSocketServer({ port: 8080 })
+
+wss.on('connection', async (ws, req) => {
+  const url = new URL(req.url!, `http://${req.headers.host}`)
+  const userId = url.searchParams.get('userId')
+  const projectId = url.searchParams.get('projectId')
+  
+  if (!userId || !projectId) {
+    ws.close(1008, 'Missing userId or projectId')
+    return
+  }
+  
+  const instance = await instanceManager.startInstance(userId, projectId)
+  const client = new ClineClient(instance.address)
+  await client.connect()
+  
+  // Subscribe to state updates
+  const stateStream = client.subscribeToState((state) => {
+    ws.send(JSON.stringify({
+      type: 'state_update',
+      data: state
+    }))
+  })
+  
+  ws.on('close', () => {
+    stateStream.cancel()
+    client.disconnect()
+  })
+})
+
+const PORT = process.env.PORT || 3000
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`)
+})
+```
+
+## Step 5: Configure Provider
+
+Configure AI provider for instances:
+
+```typescript
+// src/services/provider-config.ts
+export async function configureProvider(
+  client: ClineClient,
+  provider: 'ANTHROPIC' | 'OPENAI' | 'CLINE',
+  apiKey?: string
+): Promise<void> {
+  const config: any = {
+    metadata: {},
+    secrets: {},
+    options: {
+      actModeApiProvider: provider
+    }
+  }
+  
+  switch (provider) {
+    case 'ANTHROPIC':
+      config.secrets.apiKey = apiKey || process.env.ANTHROPIC_API_KEY
+      config.options.actModeApiModelId = 'claude-3-5-sonnet-20241022'
+      break
+    case 'OPENAI':
+      config.secrets.openAiNativeApiKey = apiKey || process.env.OPENAI_API_KEY
+      config.options.actModeApiModelId = 'gpt-4'
+      break
+    case 'CLINE':
+      config.secrets.clineApiKey = apiKey || process.env.CLINE_API_KEY
+      break
+  }
+  
+  // Call ModelsService.updateApiConfiguration
+  await client.updateApiConfiguration(config)
+}
+```
+
+## Step 6: Add Authentication
+
+Add authentication middleware:
+
+```typescript
+// src/middleware/auth.ts
+import { Request, Response, NextFunction } from 'express'
+
+export function authenticate(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  const token = req.headers.authorization?.replace('Bearer ', '')
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+  
+  // Verify token and extract user ID
+  const userId = verifyToken(token) // Your token verification logic
+  
+  if (!userId) {
+    return res.status(401).json({ error: 'Invalid token' })
+  }
+  
+  req.userId = userId
+  next()
+}
+```
+
+## Step 7: Complete Example
+
+Here's a complete example service:
+
+```typescript
+// src/index.ts
+import express from 'express'
+import { ClineInstanceManager } from './services/cline-instance-manager'
+import { configureProvider } from './services/provider-config'
+import { authenticate } from './middleware/auth'
+
+const app = express()
+app.use(express.json())
+app.use(authenticate)
+
+const instanceManager = new ClineInstanceManager(
+  process.env.CLINE_CORE_PATH || './dist-standalone/cline-core.js',
+  process.env.CLINE_HOST_PATH || './cline-host',
+  process.env.WORKSPACE_DIR || './workspaces'
+)
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' })
+})
+
+// Create task endpoint
+app.post('/api/v1/projects/:projectId/tasks', async (req, res) => {
+  try {
+    const { projectId } = req.params
+    const userId = req.userId
+    const { prompt, files, provider = 'CLINE' } = req.body
+    
+    // Get or create instance
+    const instance = await instanceManager.startInstance(userId, projectId)
+    const client = new ClineClient(instance.address)
+    await client.connect()
+    
+    // Configure provider (first time only, or if changed)
+    await configureProvider(client, provider)
+    
+    // Create task
+    const taskId = await client.createTask(prompt, files)
+    
+    res.json({
+      taskId,
+      instanceId: instance.instanceId,
+      status: 'created'
+    })
+  } catch (error: any) {
+    console.error('Error creating task:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Get task status
+app.get('/api/v1/projects/:projectId/tasks/:taskId', async (req, res) => {
+  try {
+    const { projectId, taskId } = req.params
+    const userId = req.userId
+    
+    const instance = instanceManager.getInstance(`${userId}-${projectId}`)
+    if (!instance) {
+      return res.status(404).json({ error: 'Instance not found' })
+    }
+    
+    const client = new ClineClient(instance.address)
+    await client.connect()
+    
+    const task = await client.getTask(taskId)
+    res.json(task)
+  } catch (error: any) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+const PORT = process.env.PORT || 3000
+app.listen(PORT, () => {
+  console.log(`Cline Backend Service running on port ${PORT}`)
+})
+```
+
+## Step 8: Important Considerations
+
+### Workspace Setup
+
+The `DEV_WORKSPACE_FOLDER` environment variable is critical - it tells Cline where the user's project files are located. This must be set correctly:
+
+```typescript
+// When starting cline-core, always set:
+env: {
+  DEV_WORKSPACE_FOLDER: workspacePath,  // User's project directory
+  WORKSPACE_STORAGE_DIR: path.join(clineDataDir, 'workspace'), // Cline's workspace storage
+  // ... other vars
+}
+```
+
+### Instance Registry (SQLite)
+
+Cline instances self-register in a SQLite database at `~/.cline/locks.db` (or your custom `CLINE_DIR`). This allows:
+
+- Instance discovery across processes
+- Health monitoring
+- Automatic cleanup of stale instances
+
+You can query this database to find active instances:
+
+```typescript
+import Database from 'better-sqlite3'
+
+const db = new Database(path.join(clineConfigPath, 'locks.db'))
+const instances = db.prepare('SELECT * FROM instances').all()
+```
+
+### Process Management
+
+**Important:** Always use `SIGTERM` first for graceful shutdown, then `SIGKILL` if needed:
+
+```typescript
+// Graceful shutdown
+process.kill('SIGTERM')
+await waitForExit(process, 5000)
+
+// Force kill if still running
+if (!process.killed) {
+  process.kill('SIGKILL')
+}
+```
+
+### Port Allocation
+
+Cline's CLI uses OS-allocated ports (port 0) to avoid conflicts. Your implementation should do the same:
+
+```typescript
+// Let OS choose available ports
+const server = net.createServer()
+server.listen(0, () => {
+  const port = (server.address() as net.AddressInfo).port
+  server.close()
+  // Use this port
+})
+```
+
+### Logging
+
+Cline processes write logs to `~/.cline/logs/` (or your custom directory). Monitor these for debugging:
+
+```typescript
+const logDir = path.join(clineDataDir, 'logs')
+// Logs are timestamped: cline-core-2024-01-01-12-00-00-localhost-26040.log
+```
+
+### Error Handling
+
+Handle common errors:
+
+```typescript
+try {
+  await client.createTask(prompt)
+} catch (error: any) {
+  if (error.code === grpc.status.UNAVAILABLE) {
+    // Instance is down - restart it
+    await restartInstance(instanceId)
+  } else if (error.code === grpc.status.INVALID_ARGUMENT) {
+    // Invalid request - return 400
+    res.status(400).json({ error: error.message })
+  } else {
+    // Other error - return 500
+    res.status(500).json({ error: 'Internal server error' })
+  }
+}
+```
+
+## Step 9: Deployment
+
+### Docker Setup
+
+```dockerfile
+# Dockerfile
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    git
+
+# Copy Cline standalone build
+COPY dist-standalone ./dist-standalone
+COPY cline-host ./cline-host
+
+# Copy your service
+COPY package.json package-lock.json ./
+COPY src ./src
+
+# Install dependencies
+RUN npm ci --production
+
+# Create workspace and cline directories
+RUN mkdir -p /workspaces /root/.cline
+
+EXPOSE 3000
+
+# Run as non-root user (recommended)
+RUN addgroup -g 1000 appuser && \
+    adduser -D -u 1000 -G appuser appuser && \
+    chown -R appuser:appuser /app /workspaces /root/.cline
+
+USER appuser
+
+CMD ["node", "src/index.js"]
+```
+
+### Environment Variables
+
+```bash
+# .env
+CLINE_CORE_PATH=./dist-standalone/cline-core.js
+CLINE_HOST_PATH=./cline-host
+WORKSPACE_DIR=./workspaces
+CLINE_DIR=./.cline
+ANTHROPIC_API_KEY=your-key
+CLINE_API_KEY=your-key
+PORT=3000
+NODE_ENV=production
+```
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+services:
+  cline-backend:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - CLINE_CORE_PATH=./dist-standalone/cline-core.js
+      - CLINE_HOST_PATH=./cline-host
+      - WORKSPACE_DIR=/workspaces
+      - CLINE_DIR=/.cline
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./workspaces:/workspaces
+      - ./cline-data:/.cline
+    restart: unless-stopped
+```
+
+### Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cline-backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cline-backend
+  template:
+    metadata:
+      labels:
+        app: cline-backend
+    spec:
+      containers:
+      - name: cline-backend
+        image: your-registry/cline-backend:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: CLINE_CORE_PATH
+          value: "./dist-standalone/cline-core.js"
+        - name: WORKSPACE_DIR
+          value: "/workspaces"
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cline-secrets
+              key: anthropic-api-key
+        volumeMounts:
+        - name: workspaces
+          mountPath: /workspaces
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+      volumes:
+      - name: workspaces
+        persistentVolumeClaim:
+          claimName: workspaces-pvc
+```
+
+## Step 10: Testing
+
+### Unit Tests
+
+```typescript
+// src/services/__tests__/cline-instance-manager.test.ts
+import { ClineInstanceManager } from '../cline-instance-manager'
+
+describe('ClineInstanceManager', () => {
+  let manager: ClineInstanceManager
+  
+  beforeEach(() => {
+    manager = new ClineInstanceManager(
+      './dist-standalone/cline-core.js',
+      './cline-host',
+      './test-workspaces'
+    )
+  })
+  
+  afterEach(async () => {
+    // Clean up test instances
+    const instances = Array.from(manager['instances'].keys())
+    for (const id of instances) {
+      await manager.stopInstance(id)
+    }
+  })
+  
+  it('should start and stop instances', async () => {
+    const instance = await manager.startInstance('user1', 'project1')
+    expect(instance).toBeDefined()
+    expect(instance.address).toMatch(/127\.0\.0\.1:\d+/)
+    
+    await manager.stopInstance(instance.instanceId)
+    const stopped = manager.getInstance(instance.instanceId)
+    expect(stopped).toBeUndefined()
+  })
+})
+```
+
+### Integration Tests
+
+```typescript
+// src/api/__tests__/tasks.test.ts
+import request from 'supertest'
+import app from '../server'
+
+describe('Tasks API', () => {
+  it('should create a task', async () => {
+    const response = await request(app)
+      .post('/api/v1/projects/test-project/tasks')
+      .set('Authorization', 'Bearer test-token')
+      .set('X-User-Id', 'test-user')
+      .send({
+        prompt: 'Create a hello world function',
+        files: []
+      })
+    
+    expect(response.status).toBe(200)
+    expect(response.body.taskId).toBeDefined()
+  })
+})
+```
+
+## Step 11: Complete MVP Project Structure
+
+Here's a complete project structure for your MVP:
+
+```
+cline-backend/
+├── src/
+│   ├── index.ts                 # Main entry point
+│   ├── config/
+│   │   └── index.ts             # Configuration management
+│   ├── services/
+│   │   ├── cline-instance-manager.ts
+│   │   ├── cline-client.ts
+│   │   ├── provider-config.ts
+│   │   └── health-monitor.ts    # Health monitoring service
+│   ├── api/
+│   │   ├── server.ts            # Express server setup
+│   │   ├── routes/
+│   │   │   ├── tasks.ts
+│   │   │   ├── files.ts
+│   │   │   └── projects.ts
+│   │   └── middleware/
+│   │       ├── auth.ts
+│   │       ├── error-handler.ts
+│   │       └── rate-limiter.ts
+│   ├── utils/
+│   │   ├── logger.ts            # Structured logging
+│   │   └── metrics.ts           # Metrics collection
+│   └── types/
+│       └── index.ts             # TypeScript types
+├── dist-standalone/              # Cline standalone build (from npm or build)
+├── cline-host                    # Cline host binary
+├── proto/                        # Proto files (if using proto loader)
+├── tests/
+│   ├── unit/
+│   └── integration/
+├── docker/
+│   ├── Dockerfile
+│   └── docker-compose.yml
+├── k8s/                          # Kubernetes manifests
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── ingress.yaml
+├── .env.example
+├── .gitignore
+├── package.json
+├── tsconfig.json
+└── README.md
+```
+
+### Complete package.json
+
+```json
+{
+  "name": "cline-backend",
+  "version": "1.0.0",
+  "description": "Cline headless backend service",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint src",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.9.0",
+    "@grpc/proto-loader": "^0.7.10",
+    "express": "^4.18.2",
+    "ws": "^8.14.2",
+    "better-sqlite3": "^9.2.2",
+    "dotenv": "^16.3.1",
+    "winston": "^3.11.0",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "cors": "^2.8.5",
+    "compression": "^1.7.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "@types/ws": "^8.5.10",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.2"
+  }
+}
+```
+
+## Step 12: Security Best Practices
+
+### Authentication & Authorization
+
+```typescript
+// src/api/middleware/auth.ts
+import { Request, Response, NextFunction } from 'express'
+import jwt from 'jsonwebtoken'
+
+interface AuthRequest extends Request {
+  userId?: string
+  user?: {
+    id: string
+    email: string
+    role: string
+  }
+}
+
+export function authenticate(
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+) {
+  const authHeader = req.headers.authorization
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const token = authHeader.substring(7)
+  
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any
+    req.userId = decoded.userId
+    req.user = decoded
+    next()
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid token' })
+  }
+}
+
+export function requireRole(...roles: string[]) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Unauthorized' })
+    }
+    
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Forbidden' })
+    }
+    
+    next()
+  }
+}
+```
+
+### Rate Limiting
+
+```typescript
+// src/api/middleware/rate-limiter.ts
+import rateLimit from 'express-rate-limit'
+import RedisStore from 'rate-limit-redis'
+import Redis from 'ioredis'
+
+const redis = new Redis(process.env.REDIS_URL)
+
+export const apiLimiter = rateLimit({
+  store: new RedisStore({
+    client: redis,
+    prefix: 'rl:api:'
+  }),
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.'
+})
+
+export const taskLimiter = rateLimit({
+  store: new RedisStore({
+    client: redis,
+    prefix: 'rl:task:'
+  }),
+  windowMs: 60 * 1000, // 1 minute
+  max: 5, // Limit to 5 tasks per minute per user
+  keyGenerator: (req: any) => req.userId || req.ip,
+  message: 'Too many tasks created, please try again later.'
+})
+```
+
+### Input Validation
+
+```typescript
+// src/api/middleware/validation.ts
+import { Request, Response, NextFunction } from 'express'
+
+export function validateCreateTask(req: Request, res: Response, next: NextFunction) {
+  const { prompt, files, provider } = req.body
+  
+  if (!prompt || typeof prompt !== 'string' || prompt.length === 0) {
+    return res.status(400).json({ error: 'Prompt is required' })
+  }
+  
+  if (prompt.length > 10000) {
+    return res.status(400).json({ error: 'Prompt too long (max 10000 characters)' })
+  }
+  
+  if (files && !Array.isArray(files)) {
+    return res.status(400).json({ error: 'Files must be an array' })
+  }
+  
+  if (files && files.length > 50) {
+    return res.status(400).json({ error: 'Too many files (max 50)' })
+  }
+  
+  next()
+}
+```
+
+### Security Headers
+
+```typescript
+// src/api/server.ts
+import helmet from 'helmet'
+import cors from 'cors'
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"]
+    }
+  }
+}))
+
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
+  credentials: true
+}))
+```
+
+## Step 13: Monitoring & Observability
+
+### Structured Logging
+
+```typescript
+// src/utils/logger.ts
+import winston from 'winston'
+
+export const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: {
+    service: 'cline-backend',
+    version: process.env.npm_package_version
+  },
+  transports: [
+    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'logs/combined.log' }),
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    })
+  ]
+})
+```
+
+### Metrics Collection
+
+```typescript
+// src/utils/metrics.ts
+import { Counter, Histogram, Gauge, Registry } from 'prom-client'
+
+const register = new Registry()
+
+export const metrics = {
+  // Request metrics
+  httpRequestsTotal: new Counter({
+    name: 'http_requests_total',
+    help: 'Total number of HTTP requests',
+    labelNames: ['method', 'route', 'status'],
+    registers: [register]
+  }),
+  
+  httpRequestDuration: new Histogram({
+    name: 'http_request_duration_seconds',
+    help: 'Duration of HTTP requests in seconds',
+    labelNames: ['method', 'route'],
+    buckets: [0.1, 0.5, 1, 2, 5, 10],
+    registers: [register]
+  }),
+  
+  // Instance metrics
+  activeInstances: new Gauge({
+    name: 'cline_instances_active',
+    help: 'Number of active Cline instances',
+    registers: [register]
+  }),
+  
+  instanceStartDuration: new Histogram({
+    name: 'cline_instance_start_duration_seconds',
+    help: 'Time to start a Cline instance',
+    buckets: [1, 2, 5, 10, 30],
+    registers: [register]
+  }),
+  
+  // Task metrics
+  tasksCreated: new Counter({
+    name: 'cline_tasks_created_total',
+    help: 'Total number of tasks created',
+    labelNames: ['provider'],
+    registers: [register]
+  }),
+  
+  taskDuration: new Histogram({
+    name: 'cline_task_duration_seconds',
+    help: 'Duration of tasks in seconds',
+    labelNames: ['status'],
+    buckets: [10, 30, 60, 300, 600, 1800],
+    registers: [register]
+  }),
+  
+  register
+}
+
+// Metrics endpoint
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', register.contentType)
+  res.end(await register.metrics())
+})
+```
+
+### Health Check Endpoint
+
+```typescript
+// src/api/routes/health.ts
+import { Router } from 'express'
+import { ClineInstanceManager } from '../../services/cline-instance-manager'
+
+const router = Router()
+
+router.get('/health', async (req, res) => {
+  const health = {
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    instances: {
+      active: instanceManager.getInstanceCount(),
+      total: instanceManager.getTotalInstances()
+    },
+    memory: process.memoryUsage(),
+    version: process.env.npm_package_version
+  }
+  
+  res.json(health)
+})
+
+router.get('/health/ready', async (req, res) => {
+  // Check if critical services are ready
+  const isReady = await instanceManager.isReady()
+  
+  if (isReady) {
+    res.status(200).json({ status: 'ready' })
+  } else {
+    res.status(503).json({ status: 'not ready' })
+  }
+})
+
+router.get('/health/live', (req, res) => {
+  // Liveness probe - just check if process is running
+  res.status(200).json({ status: 'alive' })
+})
+
+export default router
+```
+
+## Step 14: Production Readiness Checklist
+
+### Pre-Deployment Checklist
+
+- [ ] **Security**
+  - [ ] Authentication implemented (JWT/OAuth)
+  - [ ] Rate limiting configured
+  - [ ] Input validation on all endpoints
+  - [ ] Security headers (Helmet)
+  - [ ] CORS properly configured
+  - [ ] Secrets stored in environment variables or secret manager
+  - [ ] API keys rotated and secured
+
+- [ ] **Reliability**
+  - [ ] Error handling on all routes
+  - [ ] Graceful shutdown implemented
+  - [ ] Health checks configured
+  - [ ] Instance cleanup on failure
+  - [ ] Retry logic for transient failures
+  - [ ] Circuit breakers for external services
+
+- [ ] **Monitoring**
+  - [ ] Structured logging configured
+  - [ ] Metrics collection (Prometheus)
+  - [ ] Distributed tracing (optional)
+  - [ ] Alerting configured
+  - [ ] Log aggregation (ELK/CloudWatch)
+
+- [ ] **Performance**
+  - [ ] Connection pooling for databases
+  - [ ] Caching where appropriate
+  - [ ] Resource limits configured
+  - [ ] Load testing completed
+  - [ ] Database indexes optimized
+
+- [ ] **Scalability**
+  - [ ] Horizontal scaling tested
+  - [ ] Instance pooling implemented
+  - [ ] Auto-scaling configured
+  - [ ] Database connection limits set
+
+- [ ] **Operations**
+  - [ ] Docker images built and tested
+  - [ ] Kubernetes manifests validated
+  - [ ] CI/CD pipeline configured
+  - [ ] Backup strategy implemented
+  - [ ] Disaster recovery plan documented
+
+## Step 15: Troubleshooting Guide
+
+### Common Issues
+
+#### Instance Won't Start
+
+**Symptoms:** Instance manager fails to start instances
+
+**Solutions:**
+```typescript
+// Check logs
+const logPath = path.join(instance.clineDataDir, 'logs')
+const logs = await fs.readdir(logPath)
+const latestLog = logs.sort().reverse()[0]
+const logContent = await fs.readFile(path.join(logPath, latestLog), 'utf-8')
+console.log('Latest log:', logContent)
+
+// Verify ports are available
+const isPortAvailable = await checkPort(port)
+if (!isPortAvailable) {
+  throw new Error(`Port ${port} is already in use`)
+}
+
+// Verify cline-core.js exists
+if (!await fs.access(clineCorePath).then(() => true).catch(() => false)) {
+  throw new Error(`cline-core.js not found at ${clineCorePath}`)
+}
+```
+
+#### gRPC Connection Errors
+
+**Symptoms:** `UNAVAILABLE` or connection refused errors
+
+**Solutions:**
+```typescript
+// Verify instance is healthy
+const isHealthy = await checkHealth(address)
+if (!isHealthy) {
+  // Restart instance
+  await instanceManager.stopInstance(instanceId)
+  await instanceManager.startInstance(userId, projectId)
+}
+
+// Check firewall rules
+// Ensure ports are accessible
+
+// Verify network connectivity
+const testConnection = await testGrpcConnection(address)
+```
+
+#### High Memory Usage
+
+**Symptoms:** Instances consuming too much memory
+
+**Solutions:**
+```typescript
+// Implement instance limits
+const MAX_INSTANCES_PER_USER = 3
+const instances = await getInstancesForUser(userId)
+if (instances.length >= MAX_INSTANCES_PER_USER) {
+  throw new Error('Instance limit reached')
+}
+
+// Auto-stop inactive instances
+setInterval(async () => {
+  const inactiveInstances = await findInactiveInstances(30 * 60 * 1000) // 30 min
+  for (const instance of inactiveInstances) {
+    await instanceManager.stopInstance(instance.instanceId)
+  }
+}, 5 * 60 * 1000) // Check every 5 minutes
+```
+
+#### Task Timeouts
+
+**Symptoms:** Tasks taking too long or timing out
+
+**Solutions:**
+```typescript
+// Set task timeout
+const TASK_TIMEOUT = 10 * 60 * 1000 // 10 minutes
+
+const taskPromise = client.createTask(prompt)
+const timeoutPromise = new Promise((_, reject) => 
+  setTimeout(() => reject(new Error('Task timeout')), TASK_TIMEOUT)
+)
+
+try {
+  const taskId = await Promise.race([taskPromise, timeoutPromise])
+} catch (error) {
+  if (error.message === 'Task timeout') {
+    // Cancel task
+    await client.cancelTask()
+  }
+}
+```
+
+### Debug Mode
+
+Enable debug logging:
+
+```typescript
+// Set environment variables
+process.env.DEBUG = 'cline:*'
+process.env.LOG_LEVEL = 'debug'
+process.env.GRPC_TRACE = 'all'
+process.env.GRPC_VERBOSITY = 'DEBUG'
+```
+
+## Step 16: Performance Optimization
+
+### Instance Pooling
+
+```typescript
+// Pre-create instances for faster startup
+class InstancePool {
+  private pool: InstanceInfo[] = []
+  private maxPoolSize = 10
+  
+  async warmup() {
+    for (let i = 0; i < this.maxPoolSize; i++) {
+      const instance = await this.createPoolInstance()
+      this.pool.push(instance)
+    }
+  }
+  
+  async acquire(userId: string, projectId: string): Promise<InstanceInfo> {
+    if (this.pool.length > 0) {
+      const instance = this.pool.pop()!
+      await this.configureForUser(instance, userId, projectId)
+      return instance
+    }
+    return await instanceManager.startInstance(userId, projectId)
+  }
+}
+```
+
+### Connection Reuse
+
+```typescript
+// Reuse gRPC clients
+class ClientPool {
+  private clients: Map<string, ClineClient> = new Map()
+  
+  getClient(address: string): ClineClient {
+    if (!this.clients.has(address)) {
+      const client = new ClineClient(address)
+      this.clients.set(address, client)
+    }
+    return this.clients.get(address)!
+  }
+  
+  async removeClient(address: string) {
+    const client = this.clients.get(address)
+    if (client) {
+      await client.disconnect()
+      this.clients.delete(address)
+    }
+  }
+}
+```
+
+### Caching
+
+```typescript
+import Redis from 'ioredis'
+
+const redis = new Redis(process.env.REDIS_URL)
+
+// Cache task results
+async function getTask(taskId: string) {
+  const cacheKey = `task:${taskId}`
+  const cached = await redis.get(cacheKey)
+  
+  if (cached) {
+    return JSON.parse(cached)
+  }
+  
+  const task = await client.getTask(taskId)
+  await redis.setex(cacheKey, 300, JSON.stringify(task)) // 5 min TTL
+  return task
+}
+```
+
+## Step 17: Cost Management
+
+### Resource Limits
+
+```typescript
+// Set per-instance resource limits
+const instanceLimits = {
+  maxMemory: 2 * 1024 * 1024 * 1024, // 2GB
+  maxCpu: 1.0, // 1 CPU core
+  maxDisk: 10 * 1024 * 1024 * 1024 // 10GB
+}
+
+// Monitor and enforce limits
+setInterval(async () => {
+  for (const instance of instances) {
+    const usage = await getInstanceResourceUsage(instance)
+    
+    if (usage.memory > instanceLimits.maxMemory) {
+      logger.warn(`Instance ${instance.instanceId} exceeded memory limit`)
+      await instanceManager.stopInstance(instance.instanceId)
+    }
+  }
+}, 60000) // Check every minute
+```
+
+### Auto-Shutdown
+
+```typescript
+// Auto-shutdown inactive instances
+const INACTIVITY_TIMEOUT = 30 * 60 * 1000 // 30 minutes
+
+setInterval(async () => {
+  const now = Date.now()
+  
+  for (const instance of instances) {
+    const inactiveTime = now - instance.lastActivity.getTime()
+    
+    if (inactiveTime > INACTIVITY_TIMEOUT) {
+      logger.info(`Stopping inactive instance: ${instance.instanceId}`)
+      await instanceManager.stopInstance(instance.instanceId)
+    }
+  }
+}, 5 * 60 * 1000) // Check every 5 minutes
+```
+
+## Step 18: Complete Working Example
+
+Here's a complete, production-ready example that ties everything together:
+
+### Main Server (src/index.ts)
+
+```typescript
+import express from 'express'
+import { ClineInstanceManager } from './services/cline-instance-manager'
+import { ClineClient } from './services/cline-client'
+import { configureProvider } from './services/provider-config'
+import { authenticate } from './api/middleware/auth'
+import { apiLimiter, taskLimiter } from './api/middleware/rate-limiter'
+import { validateCreateTask } from './api/middleware/validation'
+import { logger } from './utils/logger'
+import { metrics } from './utils/metrics'
+import helmet from 'helmet'
+import cors from 'cors'
+import compression from 'compression'
+
+const app = express()
+
+// Middleware
+app.use(helmet())
+app.use(cors({ origin: process.env.ALLOWED_ORIGINS?.split(',') }))
+app.use(compression())
+app.use(express.json({ limit: '10mb' }))
+app.use(express.urlencoded({ extended: true }))
+
+// Request logging
+app.use((req, res, next) => {
+  const start = Date.now()
+  res.on('finish', () => {
+    const duration = Date.now() - start
+    metrics.httpRequestDuration.observe(
+      { method: req.method, route: req.route?.path || req.path },
+      duration / 1000
+    )
+    metrics.httpRequestsTotal.inc({
+      method: req.method,
+      route: req.route?.path || req.path,
+      status: res.statusCode
+    })
+    logger.info('HTTP request', {
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      duration
+    })
+  })
+  next()
+})
+
+// Initialize instance manager
+const instanceManager = new ClineInstanceManager(
+  process.env.CLINE_CORE_PATH!,
+  process.env.CLINE_HOST_PATH!,
+  process.env.WORKSPACE_DIR!,
+  process.env.CLINE_DIR
+)
+
+// Health endpoints (no auth required)
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  })
+})
+
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', metrics.register.contentType)
+  res.end(await metrics.register.metrics())
+})
+
+// Protected routes
+app.use(authenticate)
+app.use(apiLimiter)
+
+// Create task
+app.post(
+  '/api/v1/projects/:projectId/tasks',
+  taskLimiter,
+  validateCreateTask,
+  async (req: any, res) => {
+    const startTime = Date.now()
+    const { projectId } = req.params
+    const userId = req.userId
+    const { prompt, files = [], provider = 'CLINE' } = req.body
+
+    try {
+      logger.info('Creating task', { userId, projectId, provider })
+
+      // Get or create instance
+      const instance = await instanceManager.startInstance(userId, projectId)
+      metrics.activeInstances.set(instanceManager.getInstanceCount())
+
+      // Connect client
+      const client = new ClineClient(instance.address)
+      await client.connect()
+
+      // Configure provider (idempotent - safe to call multiple times)
+      await configureProvider(client, provider)
+
+      // Create task
+      const taskId = await client.createTask(prompt, files)
+      metrics.tasksCreated.inc({ provider })
+
+      const duration = Date.now() - startTime
+      logger.info('Task created', { taskId, userId, projectId, duration })
+
+      res.json({
+        taskId,
+        instanceId: instance.instanceId,
+        status: 'created',
+        estimatedDuration: '30-60 seconds'
+      })
+    } catch (error: any) {
+      logger.error('Failed to create task', {
+        error: error.message,
+        stack: error.stack,
+        userId,
+        projectId
+      })
+      res.status(500).json({
+        error: 'Failed to create task',
+        message: error.message
+      })
+    }
+  }
+)
+
+// Get task status
+app.get('/api/v1/projects/:projectId/tasks/:taskId', async (req: any, res) => {
+  const { projectId, taskId } = req.params
+  const userId = req.userId
+
+  try {
+    const instance = instanceManager.getInstance(`${userId}-${projectId}`)
+    if (!instance) {
+      return res.status(404).json({ error: 'Instance not found' })
+    }
+
+    const client = new ClineClient(instance.address)
+    await client.connect()
+
+    const task = await client.getTask(taskId)
+    res.json(task)
+  } catch (error: any) {
+    logger.error('Failed to get task', { error: error.message, taskId })
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Search files
+app.get('/api/v1/projects/:projectId/files/search', async (req: any, res) => {
+  const { projectId } = req.params
+  const { q, limit = '10' } = req.query
+  const userId = req.userId
+
+  try {
+    const instance = instanceManager.getInstance(`${userId}-${projectId}`)
+    if (!instance) {
+      return res.status(404).json({ error: 'Instance not found' })
+    }
+
+    const client = new ClineClient(instance.address)
+    await client.connect()
+
+    const files = await client.searchFiles(q as string, parseInt(limit as string))
+    res.json({ files })
+  } catch (error: any) {
+    logger.error('Failed to search files', { error: error.message })
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Error handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  logger.error('Unhandled error', {
+    error: err.message,
+    stack: err.stack,
+    path: req.path
+  })
+  res.status(500).json({
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+  })
+})
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM received, shutting down gracefully')
+  
+  // Stop all instances
+  const instances = Array.from(instanceManager['instances'].keys())
+  for (const instanceId of instances) {
+    await instanceManager.stopInstance(instanceId)
+  }
+  
+  process.exit(0)
+})
+
+// Start server
+const PORT = process.env.PORT || 3000
+app.listen(PORT, () => {
+  logger.info(`Cline Backend Service running on port ${PORT}`)
+  logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`)
+})
+```
+
+### Environment Configuration (.env.example)
+
+```bash
+# Server
+PORT=3000
+NODE_ENV=production
+LOG_LEVEL=info
+
+# Cline Paths
+CLINE_CORE_PATH=./dist-standalone/cline-core.js
+CLINE_HOST_PATH=./cline-host
+WORKSPACE_DIR=./workspaces
+CLINE_DIR=./.cline
+
+# API Keys (use secret manager in production)
+ANTHROPIC_API_KEY=your-anthropic-key
+CLINE_API_KEY=your-cline-key
+OPENAI_API_KEY=your-openai-key
+
+# Security
+JWT_SECRET=your-jwt-secret-change-in-production
+ALLOWED_ORIGINS=http://localhost:3000,https://yourdomain.com
+
+# Redis (for rate limiting)
+REDIS_URL=redis://localhost:6379
+
+# Monitoring
+ENABLE_METRICS=true
+```
+
+### TypeScript Configuration (tsconfig.json)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "moduleResolution": "node",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "tests"]
+}
+```
+
+### Testing the MVP
+
+```bash
+# Start the server
+npm start
+
+# In another terminal, test the API
+curl -X POST http://localhost:3000/api/v1/projects/test-project/tasks \
+  -H "Authorization: Bearer your-jwt-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Create a hello world function in Python",
+    "files": [],
+    "provider": "ANTHROPIC"
+  }'
+
+# Check task status
+curl http://localhost:3000/api/v1/projects/test-project/tasks/{taskId} \
+  -H "Authorization: Bearer your-jwt-token"
+
+# Check metrics
+curl http://localhost:3000/metrics
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="book" href="/integrations/headless-backend/api-reference">
+    Complete API documentation
+  </Card>
+  
+  <Card title="Multi-Instance Management" icon="server" href="/integrations/headless-backend/multi-instance">
+    Advanced instance management patterns
+  </Card>
+  
+  <Card title="Architecture Deep Dive" icon="building" href="/integrations/headless-backend/architecture">
+    Detailed architecture documentation
+  </Card>
+  
+  <Card title="Overview" icon="house" href="/integrations/headless-backend/overview">
+    Back to overview
+  </Card>
+</CardGroup>
+

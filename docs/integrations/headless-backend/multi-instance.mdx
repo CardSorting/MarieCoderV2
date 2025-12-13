@@ -1,0 +1,483 @@
+---
+title: "Multi-Instance Management"
+sidebarTitle: "Multi-Instance"
+description: "Managing multiple Cline instances for different users and projects"
+---
+
+## Overview
+
+When building a service like Replit, you need to manage multiple Cline instances - one per user or project. This guide covers patterns for instance lifecycle management, resource allocation, and scaling.
+
+## Instance Lifecycle
+
+### Starting Instances
+
+Each user/project should get its own isolated Cline instance:
+
+```typescript
+class InstanceManager {
+  async startInstance(userId: string, projectId: string): Promise<InstanceInfo> {
+    // 1. Check if instance already exists
+    const instanceId = `${userId}-${projectId}`
+    const existing = await this.getInstance(instanceId)
+    if (existing && await this.isHealthy(existing)) {
+      return existing
+    }
+    
+    // 2. Allocate resources
+    const ports = await this.allocatePorts()
+    const workspacePath = await this.createWorkspace(userId, projectId)
+    
+    // 3. Start host bridge
+    const hostProcess = await this.startHostBridge(ports.hostBridge, workspacePath)
+    
+    // 4. Start cline-core
+    const coreProcess = await this.startCore(ports.core, ports.hostBridge, workspacePath)
+    
+    // 5. Wait for readiness
+    await this.waitForReady(ports.core)
+    
+    // 6. Configure provider
+    await this.configureProvider(ports.core)
+    
+    // 7. Register instance
+    const instance: InstanceInfo = {
+      instanceId,
+      address: `127.0.0.1:${ports.core}`,
+      hostBridgePort: ports.hostBridge,
+      workspacePath,
+      userId,
+      projectId,
+      processes: { core: coreProcess, host: hostProcess },
+      startedAt: new Date(),
+      lastActivity: new Date()
+    }
+    
+    await this.registry.register(instance)
+    return instance
+  }
+}
+```
+
+### Stopping Instances
+
+Clean up instances when no longer needed:
+
+```typescript
+async stopInstance(instanceId: string): Promise<void> {
+  const instance = await this.registry.get(instanceId)
+  if (!instance) return
+  
+  try {
+    // 1. Gracefully shutdown
+    if (instance.processes.core) {
+      instance.processes.core.kill('SIGTERM')
+      await waitForProcessExit(instance.processes.core, 5000)
+    }
+    
+    if (instance.processes.host) {
+      instance.processes.host.kill('SIGTERM')
+      await waitForProcessExit(instance.processes.host, 5000)
+    }
+    
+    // 2. Force kill if still running
+    if (instance.processes.core && !instance.processes.core.killed) {
+      instance.processes.core.kill('SIGKILL')
+    }
+    if (instance.processes.host && !instance.processes.host.killed) {
+      instance.processes.host.kill('SIGKILL')
+    }
+  } catch (error) {
+    console.error(`Error stopping instance ${instanceId}:`, error)
+  } finally {
+    // 3. Release resources
+    await this.releasePorts(instance.address, instance.hostBridgePort)
+    await this.registry.unregister(instanceId)
+  }
+}
+```
+
+## Instance Registry
+
+### SQLite Registry (Default)
+
+Cline uses SQLite for instance registry by default:
+
+```typescript
+class SQLiteRegistry {
+  private db: Database
+  
+  async register(instance: InstanceInfo): Promise<void> {
+    await this.db.run(`
+      INSERT INTO instances (
+        instance_id, address, host_bridge_port, workspace_path,
+        user_id, project_id, started_at, last_activity
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      instance.instanceId,
+      instance.address,
+      instance.hostBridgePort,
+      instance.workspacePath,
+      instance.userId,
+      instance.projectId,
+      instance.startedAt.toISOString(),
+      instance.lastActivity.toISOString()
+    ])
+  }
+  
+  async get(instanceId: string): Promise<InstanceInfo | null> {
+    const row = await this.db.get(
+      'SELECT * FROM instances WHERE instance_id = ?',
+      [instanceId]
+    )
+    return row ? this.rowToInstance(row) : null
+  }
+  
+  async listByUser(userId: string): Promise<InstanceInfo[]> {
+    const rows = await this.db.all(
+      'SELECT * FROM instances WHERE user_id = ?',
+      [userId]
+    )
+    return rows.map(this.rowToInstance)
+  }
+  
+  async updateActivity(instanceId: string): Promise<void> {
+    await this.db.run(
+      'UPDATE instances SET last_activity = ? WHERE instance_id = ?',
+      [new Date().toISOString(), instanceId]
+    )
+  }
+}
+```
+
+### Distributed Registry (Redis/PostgreSQL)
+
+For distributed systems, use Redis or PostgreSQL:
+
+```typescript
+class RedisRegistry {
+  private redis: RedisClient
+  
+  async register(instance: InstanceInfo): Promise<void> {
+    const key = `instance:${instance.instanceId}`
+    await this.redis.setex(
+      key,
+      3600, // TTL: 1 hour
+      JSON.stringify(instance)
+    )
+    
+    // Also maintain index by user
+    await this.redis.sadd(
+      `user:${instance.userId}:instances`,
+      instance.instanceId
+    )
+  }
+  
+  async get(instanceId: string): Promise<InstanceInfo | null> {
+    const key = `instance:${instanceId}`
+    const data = await this.redis.get(key)
+    return data ? JSON.parse(data) : null
+  }
+  
+  async listByUser(userId: string): Promise<InstanceInfo[]> {
+    const instanceIds = await this.redis.smembers(
+      `user:${userId}:instances`
+    )
+    
+    const instances = await Promise.all(
+      instanceIds.map(id => this.get(id))
+    )
+    
+    return instances.filter(i => i !== null) as InstanceInfo[]
+  }
+}
+```
+
+## Resource Management
+
+### Port Allocation
+
+Manage port allocation to avoid conflicts:
+
+```typescript
+class PortManager {
+  private availablePorts: Set<number>
+  private allocatedPorts: Map<string, number[]>
+  
+  constructor(startPort = 26040, endPort = 27000) {
+    this.availablePorts = new Set()
+    for (let port = startPort; port < endPort; port += 2) {
+      this.availablePorts.add(port)
+    }
+    this.allocatedPorts = new Map()
+  }
+  
+  async allocate(instanceId: string): Promise<{ core: number, hostBridge: number }> {
+    if (this.allocatedPorts.has(instanceId)) {
+      const ports = this.allocatedPorts.get(instanceId)!
+      return { core: ports[0], hostBridge: ports[1] }
+    }
+    
+    const corePort = Array.from(this.availablePorts)[0]
+    if (!corePort) {
+      throw new Error('No available ports')
+    }
+    
+    this.availablePorts.delete(corePort)
+    const hostBridgePort = corePort + 1
+    this.availablePorts.delete(hostBridgePort)
+    
+    this.allocatedPorts.set(instanceId, [corePort, hostBridgePort])
+    
+    return { core: corePort, hostBridge: hostBridgePort }
+  }
+  
+  async release(instanceId: string): Promise<void> {
+    const ports = this.allocatedPorts.get(instanceId)
+    if (ports) {
+      this.availablePorts.add(ports[0])
+      this.availablePorts.add(ports[1])
+      this.allocatedPorts.delete(instanceId)
+    }
+  }
+}
+```
+
+### Workspace Management
+
+Create and manage isolated workspaces:
+
+```typescript
+class WorkspaceManager {
+  constructor(private baseDir: string) {}
+  
+  async createWorkspace(userId: string, projectId: string): Promise<string> {
+    const workspacePath = path.join(
+      this.baseDir,
+      userId,
+      projectId
+    )
+    
+    await fs.mkdir(workspacePath, { recursive: true })
+    
+    // Create .cline directory
+    const clineDir = path.join(workspacePath, '.cline')
+    await fs.mkdir(clineDir, { recursive: true })
+    
+    // Initialize git if needed
+    // await this.initGit(workspacePath)
+    
+    return workspacePath
+  }
+  
+  async cleanupWorkspace(workspacePath: string): Promise<void> {
+    // Optionally clean up workspace when instance stops
+    // Be careful - user data might be important!
+    // await fs.rm(workspacePath, { recursive: true, force: true })
+  }
+  
+  async getWorkspaceSize(workspacePath: string): Promise<number> {
+    // Calculate workspace size for quota management
+    let totalSize = 0
+    const files = await this.getAllFiles(workspacePath)
+    
+    for (const file of files) {
+      const stats = await fs.stat(file)
+      totalSize += stats.size
+    }
+    
+    return totalSize
+  }
+}
+```
+
+## Health Monitoring
+
+### Health Checks
+
+Monitor instance health:
+
+```typescript
+class HealthMonitor {
+  async checkHealth(address: string): Promise<boolean> {
+    try {
+      const client = createHealthClient(address)
+      const response = await client.check({ service: '' })
+      return response.status === 'SERVING'
+    } catch {
+      return false
+    }
+  }
+  
+  async checkAllInstances(): Promise<void> {
+    const instances = await this.registry.listAll()
+    
+    for (const instance of instances) {
+      const isHealthy = await this.checkHealth(instance.address)
+      
+      if (!isHealthy) {
+        console.warn(`Instance ${instance.instanceId} is unhealthy`)
+        // Optionally restart or cleanup
+        await this.handleUnhealthyInstance(instance)
+      }
+    }
+  }
+  
+  private async handleUnhealthyInstance(instance: InstanceInfo): Promise<void> {
+    // Try to restart
+    try {
+      await this.instanceManager.stopInstance(instance.instanceId)
+      await this.instanceManager.startInstance(
+        instance.userId,
+        instance.projectId
+      )
+    } catch (error) {
+      // If restart fails, mark for cleanup
+      await this.registry.markForCleanup(instance.instanceId)
+    }
+  }
+}
+```
+
+### Activity Tracking
+
+Track instance activity for auto-shutdown:
+
+```typescript
+class ActivityTracker {
+  private activityTimeouts: Map<string, NodeJS.Timeout> = new Map()
+  
+  constructor(
+    private inactivityTimeout = 30 * 60 * 1000 // 30 minutes
+  ) {}
+  
+  recordActivity(instanceId: string): void {
+    // Update last activity
+    this.registry.updateActivity(instanceId)
+    
+    // Clear existing timeout
+    const existing = this.activityTimeouts.get(instanceId)
+    if (existing) {
+      clearTimeout(existing)
+    }
+    
+    // Set new timeout
+    const timeout = setTimeout(async () => {
+      await this.handleInactivity(instanceId)
+    }, this.inactivityTimeout)
+    
+    this.activityTimeouts.set(instanceId, timeout)
+  }
+  
+  private async handleInactivity(instanceId: string): Promise<void> {
+    console.log(`Instance ${instanceId} inactive, stopping...`)
+    await this.instanceManager.stopInstance(instanceId)
+    this.activityTimeouts.delete(instanceId)
+  }
+}
+```
+
+## Scaling Patterns
+
+### Instance Pooling
+
+Pre-create instances for faster startup:
+
+```typescript
+class InstancePool {
+  private pool: InstanceInfo[] = []
+  private maxPoolSize = 10
+  
+  async initialize(): Promise<void> {
+    // Pre-create instances
+    for (let i = 0; i < this.maxPoolSize; i++) {
+      const instance = await this.createPoolInstance()
+      this.pool.push(instance)
+    }
+  }
+  
+  async acquire(userId: string, projectId: string): Promise<InstanceInfo> {
+    // Try to get from pool
+    if (this.pool.length > 0) {
+      const instance = this.pool.pop()!
+      // Reconfigure for user/project
+      await this.configureInstance(instance, userId, projectId)
+      return instance
+    }
+    
+    // Pool empty, create new
+    return await this.instanceManager.startInstance(userId, projectId)
+  }
+  
+  async release(instance: InstanceInfo): Promise<void> {
+    // Clean up user-specific data
+    await this.cleanupInstance(instance)
+    
+    // Return to pool if not full
+    if (this.pool.length < this.maxPoolSize) {
+      this.pool.push(instance)
+    } else {
+      // Pool full, stop instance
+      await this.instanceManager.stopInstance(instance.instanceId)
+    }
+  }
+}
+```
+
+### Auto-Scaling
+
+Scale instances based on demand:
+
+```typescript
+class AutoScaler {
+  async scale(): Promise<void> {
+    const activeInstances = await this.registry.countActive()
+    const targetInstances = await this.calculateTarget()
+    
+    if (activeInstances < targetInstances) {
+      // Scale up
+      const diff = targetInstances - activeInstances
+      await this.scaleUp(diff)
+    } else if (activeInstances > targetInstances) {
+      // Scale down
+      const diff = activeInstances - targetInstances
+      await this.scaleDown(diff)
+    }
+  }
+  
+  private async calculateTarget(): Promise<number> {
+    // Calculate based on:
+    // - Current load
+    // - Queue length
+    // - Resource availability
+    const queueLength = await this.getQueueLength()
+    const avgProcessingTime = await this.getAvgProcessingTime()
+    
+    return Math.ceil(queueLength / avgProcessingTime)
+  }
+}
+```
+
+## Best Practices
+
+1. **Instance Limits**: Limit instances per user to prevent abuse
+2. **Resource Quotas**: Set CPU/memory limits per instance
+3. **Auto-Cleanup**: Automatically stop inactive instances
+4. **Health Monitoring**: Regularly check instance health
+5. **Graceful Shutdown**: Always shutdown instances gracefully
+6. **Error Recovery**: Handle instance failures gracefully
+7. **Logging**: Log all instance lifecycle events
+8. **Metrics**: Track instance metrics (count, health, resource usage)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture Deep Dive" icon="building" href="/integrations/headless-backend/architecture">
+    Learn about the detailed architecture
+  </Card>
+  
+  <Card title="Implementation Guide" icon="code" href="/integrations/headless-backend/implementation">
+    Step-by-step implementation guide
+  </Card>
+</CardGroup>
+
