@@ -1,45 +1,46 @@
-import { Router } from 'express'
-import { taskLimiter } from '../middleware/rate-limiter'
-import { AuthRequest } from '../middleware/auth'
-import { validateCreateTaskRequest } from '../../validators/task-validator'
-import { taskService } from '../../services/task-service'
+import { Router } from "express"
+import { taskService } from "../../services/task-service"
+import { validateCreateTaskRequest } from "../../validators/task-validator"
+import { AuthRequest } from "../middleware/auth"
+import { taskLimiter } from "../middleware/rate-limiter"
 
 const router = Router()
 
 // Create task
-router.post(
-  '/',
-  taskLimiter,
-  async (req: AuthRequest, res, next) => {
-    try {
-      const { projectId } = req.params
-      const userId = req.userId!
+router.post("/", taskLimiter, async (req: AuthRequest, res, next) => {
+	try {
+		const { projectId } = req.params
+		const userId = req.userId!
 
-      // Validate request
-      const request = validateCreateTaskRequest(req.body)
+		// Validate request
+		const request = validateCreateTaskRequest(req.body)
 
-      // Create task using service layer
-      const result = await taskService.createTask(userId, projectId, request)
-      
-      res.json(result)
-    } catch (error) {
-      next(error)
-    }
-  }
-)
+		// Add Cline token to request for CLINE provider
+		if (req.clineToken) {
+			// Extend request with clineToken for provider configuration
+			Object.assign(request, { clineToken: req.clineToken })
+		}
+
+		// Create task using service layer
+		const result = await taskService.createTask(userId, projectId, request)
+
+		res.json(result)
+	} catch (error) {
+		next(error)
+	}
+})
 
 // Get task status
-router.get('/:taskId', async (req: AuthRequest, res, next) => {
-  try {
-    const { projectId, taskId } = req.params
-    const userId = req.userId!
+router.get("/:taskId", async (req: AuthRequest, res, next) => {
+	try {
+		const { projectId, taskId } = req.params
+		const userId = req.userId!
 
-    const task = await taskService.getTask(userId, projectId, taskId)
-    res.json(task)
-  } catch (error) {
-    next(error)
-  }
+		const task = await taskService.getTask(userId, projectId, taskId)
+		res.json(task)
+	} catch (error) {
+		next(error)
+	}
 })
 
 export default router
-

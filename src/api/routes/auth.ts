@@ -1,75 +1,126 @@
-import { Router } from 'express'
-import jwt from 'jsonwebtoken'
-import { userService } from '../../services/user-service'
-import { configService } from '../../config'
-import { authenticate, AuthRequest } from '../middleware/auth'
+import { Router } from "express"
+import { clineAuthService } from "../../services/cline-auth-service"
+import { dbService } from "../../services/db-service"
+import { logger } from "../../utils/logger"
+import { AuthRequest, authenticate } from "../middleware/auth"
 
 const router = Router()
 
-// Register new user
-router.post('/register', async (req, res, next) => {
-  try {
-    const { username, email, password } = req.body
+// Get Cline OAuth authorization URL
+router.get("/authorize", async (req, res, next) => {
+	try {
+		const callbackUrl = (req.query.callback_url as string) || `${req.protocol}://${req.get("host")}/api/v1/auth/callback`
 
-    const user = await userService.register({ username, email, password })
+		const authUrl = await clineAuthService.getAuthUrl(callbackUrl)
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user.id, username: user.username },
-      configService.getSecurity().jwtSecret,
-      { expiresIn: '7d' }
-    )
-
-    res.status(201).json({
-      user,
-      token
-    })
-  } catch (error) {
-    next(error)
-  }
+		res.json({ authUrl })
+	} catch (error) {
+		next(error)
+	}
 })
 
-// Login user
-router.post('/login', async (req, res, next) => {
-  try {
-    const { username, password } = req.body
+// OAuth callback - exchange code for tokens
+router.get("/callback", async (req, res, _next) => {
+	try {
+		const { code, provider } = req.query
 
-    const user = await userService.login({ username, password })
+		if (!code || typeof code !== "string") {
+			return res.status(400).json({ error: "Authorization code is required" })
+		}
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user.id, username: user.username },
-      configService.getSecurity().jwtSecret,
-      { expiresIn: '7d' }
-    )
+		const callbackUrl = `${req.protocol}://${req.get("host")}/api/v1/auth/callback`
 
-    res.json({
-      user,
-      token
-    })
-  } catch (error) {
-    next(error)
-  }
+		const tokens = await clineAuthService.exchangeCodeForTokens(code, callbackUrl, provider as string)
+
+		// Store tokens in database (link to user)
+		// For now, we'll store the access token and user info
+		// In production, you'd want to encrypt these
+		const userId = tokens.userInfo?.id || tokens.userInfo?.clineUserId || "unknown"
+
+		// Create or update user in our database
+		let user = dbService.getUserById(userId)
+		if (!user) {
+			// Create user from Cline auth
+			user = dbService.createUser({
+				id: userId,
+				username: tokens.userInfo?.email?.split("@")[0] || "user",
+				email: tokens.userInfo?.email || "",
+				password_hash: "", // No password needed for OAuth
+			})
+		}
+
+		// Redirect to frontend with token
+		const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173"
+		res.redirect(
+			`${frontendUrl}/auth/callback?token=${encodeURIComponent(tokens.accessToken)}&refreshToken=${encodeURIComponent(tokens.refreshToken)}`,
+		)
+	} catch (error) {
+		logger.error("OAuth callback error", { error })
+		const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173"
+		res.redirect(`${frontendUrl}/login?error=auth_failed`)
+	}
 })
 
-// Get current user (requires authentication)
-router.get('/me', authenticate, async (req: AuthRequest, res, next) => {
-  try {
-    const userId = req.userId
+// Exchange code for tokens (POST endpoint for flexibility)
+router.post("/token", async (req, res, next) => {
+	try {
+		const { code, callback_url, provider } = req.body
 
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized' })
-    }
+		if (!code) {
+			return res.status(400).json({ error: "Authorization code is required" })
+		}
 
-    const user = userService.getUserById(userId)
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' })
-    }
+		const callbackUrl = callback_url || `${req.protocol}://${req.get("host")}/api/v1/auth/callback`
 
-    res.json({ user })
-  } catch (error) {
-    next(error)
-  }
+		const tokens = await clineAuthService.exchangeCodeForTokens(code, callbackUrl, provider)
+
+		res.json({
+			accessToken: tokens.accessToken,
+			refreshToken: tokens.refreshToken,
+			expiresAt: tokens.expiresAt,
+			user: tokens.userInfo,
+		})
+	} catch (error) {
+		next(error)
+	}
+})
+
+// Refresh access token
+router.post("/refresh", async (req, res, next) => {
+	try {
+		const { refreshToken } = req.body
+
+		if (!refreshToken) {
+			return res.status(400).json({ error: "Refresh token is required" })
+		}
+
+		const tokens = await clineAuthService.refreshToken(refreshToken)
+
+		res.json({
+			accessToken: tokens.accessToken,
+			refreshToken: tokens.refreshToken,
+			expiresAt: tokens.expiresAt,
+			user: tokens.userInfo,
+		})
+	} catch (error) {
+		next(error)
+	}
+})
+
+// Get current user (requires Cline authentication)
+router.get("/me", authenticate, async (req: AuthRequest, res, next) => {
+	try {
+		const token = req.headers.authorization?.replace("Bearer ", "")
+
+		if (!token) {
+			return res.status(401).json({ error: "Unauthorized" })
+		}
+
+		const userInfo = await clineAuthService.getUserInfo(token)
+		res.json({ user: userInfo })
+	} catch (error) {
+		next(error)
+	}
 })
 
 export default router

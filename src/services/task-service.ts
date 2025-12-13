@@ -1,65 +1,57 @@
-import { instanceManager } from '../index'
-import { clientFactory } from './cline-client-factory'
-import { configureProvider } from './provider-config'
-import { logger } from '../utils/logger'
-import { metrics } from '../utils/metrics'
-import { CreateTaskRequest, CreateTaskResponse } from '../types'
-import { InstanceNotFoundError } from '../errors/instance-error'
+import { InstanceNotFoundError } from "../errors/instance-error"
+import { instanceManager } from "../index"
+import { CreateTaskRequest, CreateTaskResponse } from "../types"
+import { logger } from "../utils/logger"
+import { metrics } from "../utils/metrics"
+import { clientFactory } from "./cline-client-factory"
+import { configureProvider } from "./provider-config"
 
 export class TaskService {
-  async createTask(
-    userId: string,
-    projectId: string,
-    request: CreateTaskRequest
-  ): Promise<CreateTaskResponse> {
-    const startTime = Date.now()
-    
-    logger.info('Creating task', { userId, projectId, provider: request.provider })
+	async createTask(userId: string, projectId: string, request: CreateTaskRequest): Promise<CreateTaskResponse> {
+		const startTime = Date.now()
 
-    // Get or create instance
-    const instanceStartTime = Date.now()
-    const instance = await instanceManager.startInstance(userId, projectId)
-    metrics.instanceStartDuration.observe(Date.now() - instanceStartTime)
-    metrics.activeInstances.set(instanceManager.getInstanceCount())
+		logger.info("Creating task", { userId, projectId, provider: request.provider })
 
-    // Get client from factory (with connection pooling)
-    const client = await clientFactory.getClient(instance.address)
+		// Get or create instance
+		const instanceStartTime = Date.now()
+		const instance = await instanceManager.startInstance(userId, projectId)
+		metrics.instanceStartDuration.observe(Date.now() - instanceStartTime)
+		metrics.activeInstances.set(instanceManager.getInstanceCount())
 
-    // Configure provider (idempotent - safe to call multiple times)
-    await configureProvider(client, request.provider || 'CLINE')
+		// Get client from factory (with connection pooling)
+		const client = await clientFactory.getClient(instance.address)
 
-    // Create task
-    const taskId = await client.createTask(request.prompt, request.files)
-    metrics.tasksCreated.inc({ provider: request.provider || 'CLINE' })
+		// Configure provider (idempotent - safe to call multiple times)
+		// For CLINE provider, use the user's Cline access token if available
+		await configureProvider(client, request.provider || "CLINE", request.clineToken)
 
-    const duration = Date.now() - startTime
-    logger.info('Task created', { taskId, userId, projectId, duration })
+		// Create task
+		const taskId = await client.createTask(request.prompt, request.files)
+		metrics.tasksCreated.inc({ provider: request.provider || "CLINE" })
 
-    return {
-      taskId,
-      instanceId: instance.instanceId,
-      status: 'created',
-      estimatedDuration: '30-60 seconds'
-    }
-  }
+		const duration = Date.now() - startTime
+		logger.info("Task created", { taskId, userId, projectId, duration })
 
-  async getTask(
-    userId: string,
-    projectId: string,
-    taskId: string
-  ): Promise<unknown> {
-    const instanceId = `${userId}-${projectId}`
-    const instance = instanceManager.getInstance(instanceId)
-    
-    if (!instance) {
-      throw new InstanceNotFoundError(instanceId)
-    }
+		return {
+			taskId,
+			instanceId: instance.instanceId,
+			status: "created",
+			estimatedDuration: "30-60 seconds",
+		}
+	}
 
-    const client = await clientFactory.getClient(instance.address)
-    return await client.getTask(taskId)
-  }
+	async getTask(userId: string, projectId: string, taskId: string): Promise<unknown> {
+		const instanceId = `${userId}-${projectId}`
+		const instance = instanceManager.getInstance(instanceId)
+
+		if (!instance) {
+			throw new InstanceNotFoundError(instanceId)
+		}
+
+		const client = await clientFactory.getClient(instance.address)
+		return await client.getTask(taskId)
+	}
 }
 
 // Singleton instance
 export const taskService = new TaskService()
-
