@@ -22,12 +22,11 @@ export class TaskService {
 		const client = await clientFactory.getClient(instance.address)
 
 		// Configure provider (idempotent - safe to call multiple times)
-		// For CLINE provider, use the user's Cline access token if available
-		await configureProvider(client, request.provider || "CLINE", request.clineToken)
+		await configureProvider(client, request.provider || "ANTHROPIC")
 
 		// Create task
 		const taskId = await client.createTask(request.prompt, request.files)
-		metrics.tasksCreated.inc({ provider: request.provider || "CLINE" })
+		metrics.tasksCreated.inc({ provider: request.provider || "ANTHROPIC" })
 
 		const duration = Date.now() - startTime
 		logger.info("Task created", { taskId, userId, projectId, duration })

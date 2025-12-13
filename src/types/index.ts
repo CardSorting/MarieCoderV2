@@ -18,7 +18,6 @@ export interface CreateTaskRequest {
   prompt: string
   files?: string[]
   provider?: 'ANTHROPIC' | 'OPENAI' | 'CLINE'
-  clineToken?: string // Added by auth middleware for CLINE provider
 }
 
 export interface CreateTaskResponse {

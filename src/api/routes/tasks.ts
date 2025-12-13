@@ -15,12 +15,6 @@ router.post("/", taskLimiter, async (req: AuthRequest, res, next) => {
 		// Validate request
 		const request = validateCreateTaskRequest(req.body)
 
-		// Add Cline token to request for CLINE provider
-		if (req.clineToken) {
-			// Extend request with clineToken for provider configuration
-			Object.assign(request, { clineToken: req.clineToken })
-		}
-
 		// Create task using service layer
 		const result = await taskService.createTask(userId, projectId, request)
 

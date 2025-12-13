@@ -25,15 +25,13 @@ export async function configureProvider(client: ClineClient, provider: Provider,
 			config.options.actModeApiModelId = "gpt-4"
 			break
 		case "CLINE":
-			// For Cline provider, use the user's access token from authentication
-			// The token is passed as apiKey parameter when user is authenticated
-			// Prefix with 'workos:' for backend routing to WorkOS provider
+			// For Cline provider, use API key from environment or provided parameter
 			if (apiKey) {
 				config.secrets.clineApiKey = apiKey.startsWith("workos:") ? apiKey : `workos:${apiKey}`
 			} else if (apiKeys.cline) {
 				config.secrets.clineApiKey = apiKeys.cline
 			} else {
-				throw new Error("Cline access token is required for CLINE provider")
+				throw new Error("Cline API key is required for CLINE provider. Set CLINE_API_KEY environment variable or provide apiKey parameter.")
 			}
 			config.options.actModeApiProvider = "CLINE"
 			break
